@@ -27,6 +27,7 @@ typedef unsigned char uint8_t;
 
 #include "api.h"
 
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -57,7 +58,7 @@ namespace pxar {
     template<class ConfigType>
       bool operator()(const ConfigType &config) const
       {
-	return config.enable == _isEnable;
+	return config.enable() == _isEnable;
       }
   };
 
@@ -73,7 +74,7 @@ namespace pxar {
     template<class ConfigType>
       bool operator()(const ConfigType &config) const
       {
-	return config.mask == _isMasked;
+	return config.mask() == _isMasked;
       }
   };
 
@@ -95,8 +96,8 @@ namespace pxar {
     template<class ConfigType>
       bool operator()(const ConfigType &config) const
       {
-	if(_check_roc) return (config.row == _row) && (config.column == _column) && (config.roc_id == _roc);
-	return (config.row == _row) && (config.column == _column);
+	if(_check_roc) return (config.row() == _row) && (config.column() == _column) && (config.roc() == _roc);
+	return (config.row() == _row) && (config.column() == _column);
       }
   };
 
@@ -115,7 +116,7 @@ namespace pxar {
     template<class ConfigType>
       bool operator()(const ConfigType &config) const
       {
-	return (config.row > _row) || (config.column > _column);
+	return (config.row() > _row) || (config.column() > _column);
       }
   };
 
@@ -135,18 +136,66 @@ namespace pxar {
       }
   };
 
+  /** Helper to compare the pixel configuration of rocConfigs
+  */
+  bool inline comparePixelConfiguration(const std::vector<pixelConfig> pxA, const std::vector<pixelConfig> pxB) {
+
+    // Check the number of enabled pixels:
+    if(pxA.size() != pxB.size()) return false;
+
+    // Check the single pixels:
+    for(std::vector<pixelConfig>::const_iterator pixit = pxA.begin(); pixit != pxA.end(); pixit++){
+      if(std::count_if(pxB.begin(), pxB.end(), findPixelXY(pixit->column(),pixit->row())) != 1) { return false; }
+    }
+    return true;
+  }
+
+  /** Helper function to recover the ADC sign of analog data words
+   */
+  inline int16_t expandSign(uint16_t x) { return (x & 0x0800) ? static_cast<int16_t>(x) - 4096 : static_cast<int16_t>(x); }
+
   /** Helper function to return a printed list of an integer vector, used to shield
    *  debug code from being executed if debug level is not sufficient
    */
   template <typename T>
-    std::string listVector(std::vector<T> vec, bool hex = false) {
+    std::string listVector(std::vector<T> vec, bool hex = false, bool sign = false, bool tabs = false) {
     std::stringstream os;
     if(hex) { os << std::hex; }
     for(typename std::vector<T>::iterator it = vec.begin(); it != vec.end(); ++it) {
-      if(hex) os << std::setw(4) << std::setfill('0');
-      os << static_cast<int>(*it) << " ";
+      if(sign) { os << expandSign(*it & 0x0fff) << " "; }
+      else {
+	if(hex) os << std::setw(4) << std::setfill('0');
+	os << static_cast<int>(*it);
+	os << (tabs ? "\t" : " ");
+      }
     }
     if(hex) { os << std::dec; }
+    return os.str();
+  }
+
+  /** Helper function to test if all vector elements are equal
+   */
+  template <typename T>
+    bool equalElements(std::vector<T> vec) {
+    // Empty vectors cannot be tested:
+    if(vec.empty()) return true;
+    
+    T first = vec.front();
+    for(typename std::vector<T>::iterator it = vec.begin(); it != vec.end(); ++it) {
+      if(*it != first) return false;
+    }
+    return true;
+  }
+  
+  /** Helper function to output bool variables as TRUE or FALSE text
+   */
+  inline std::string textBool(bool in) { return (in ? "TRUE" : "FALSE"); }
+  inline std::string textBools(std::vector<bool> vec, bool tabs = false) {
+    std::stringstream os;
+    for(std::vector<bool>::iterator it = vec.begin(); it != vec.end(); ++it) {
+      os << (*it ? "TRUE" : "FALSE");
+      os << (tabs ? "\t" : " ");
+    }
     return os.str();
   }
 
@@ -167,6 +216,10 @@ namespace pxar {
     if((flags&FLAG_NOSORT) != 0) { os << "FLAG_NOSORT, "; flags -= FLAG_NOSORT; }
     if((flags&FLAG_CHECK_ORDER) != 0) { os << "FLAG_CHECK_ORDER, "; flags -= FLAG_CHECK_ORDER; }
     if((flags&FLAG_FORCE_UNMASKED) != 0) { os << "FLAG_FORCE_UNMASKED, "; flags -= FLAG_FORCE_UNMASKED; }
+    if((flags&FLAG_DUMP_FLAWED_EVENTS) != 0) { os << "FLAG_DUMP_FLAWED_EVENTS, "; flags -= FLAG_DUMP_FLAWED_EVENTS; }
+    if((flags&FLAG_DISABLE_READBACK_COLLECTION) != 0) { os << "FLAG_DISABLE_READBACK_COLLECTION, "; flags -= FLAG_DISABLE_READBACK_COLLECTION; }
+    if((flags&FLAG_DISABLE_EVENTID_CHECK) != 0) { os << "FLAG_DISABLE_EVENTID_CHECK, "; flags -= FLAG_DISABLE_EVENTID_CHECK; }
+    if((flags&FLAG_ENABLE_XORSUM_LOGGING) != 0) { os << "FLAG_ENABLE_XORSUM_LOGGING, "; flags -= FLAG_ENABLE_XORSUM_LOGGING; }
 
     if(flags != 0) os << "Unknown flag: " << flags;
     return os.str();

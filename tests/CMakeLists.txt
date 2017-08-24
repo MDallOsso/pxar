@@ -20,14 +20,21 @@ PixTestTrim.cc
 PixTestSetup.cc
 PixTestPattern.cc
 PixTestPretest.cc
+PixTestTiming.cc
 PixTestFactory.cc
 PixTestPh.cc
 PixTestPhOptimization.cc
-PixTestBBMap.cc	
+PixTestReadback.cc
+PixTestBBMap.cc
+PixTestBB2Map.cc
+PixTestBB3Map.cc
+PixTestBB4Map.cc
+PixTestBareModule.cc
 PixTestFullTest.cc
+PixTestCmd.cc
 )
 
-# fill list of header files 
+# fill list of header files
 set(TESTLIB_HEADERS
 PixTest.hh
 PixTestDaq.hh
@@ -45,18 +52,25 @@ PixTestTrim.hh
 PixTestSetup.hh
 PixTestPattern.hh
 PixTestPretest.hh
+PixTestTiming.hh
 PixTestFactory.hh
 PixTestPh.hh
 PixTestPhOptimization.hh
+PixTestReadback.hh
 PixTestBBMap.hh
+PixTestBB2Map.hh
+PixTestBB3Map.hh
+PixTestBB4Map.hh
+PixTestBareModule.hh
 PixTestFullTest.hh
+PixTestCmd.hh
 )
 
 SET(MY_INCLUDE_DIRECTORIES ${PROJECT_SOURCE_DIR}/core/api ${PROJECT_SOURCE_DIR}/core/utils ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/util ${PROJECT_SOURCE_DIR}/ana ${ROOT_INCLUDE_DIR} )
 
 # set everything needed for the root dictonary and create the
 # dictionary
-set(TESTLIB_DICTIONARY ${CMAKE_CURRENT_BINARY_DIR}/testsDict.cxx) 
+set(TESTLIB_DICTIONARY ${CMAKE_CURRENT_BINARY_DIR}/testsDict.cxx)
 ROOT_GENERATE_DICTIONARY_OLD("${TESTLIB_HEADERS}" "${TESTLIB_DICTIONARY}" "${MY_INCLUDE_DIRECTORIES}")
 
 

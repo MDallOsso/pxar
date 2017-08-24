@@ -22,6 +22,7 @@ typedef unsigned char uint8_t;
 #include <stdint.h>
 #endif
 
+
 #include <string>
 #include <vector>
 #include <map>
@@ -71,16 +72,33 @@ typedef unsigned char uint8_t;
  *  in a wrong position (e.g. expecting pixel 13,8 but receiving pixel 13,9) are flagged with a
  *  negative pulse height. This flag can be used e.g. for pixel address test to make sure all of them
  *  are answering with their correct address.
- *  This flag might not work correctly with FLAG_FORCE_UNMASKED, since noise pixel hits
- *  might end up being flagged as out-of-order.
+ *  When running with FLAG_FORCE_UNMASKED all noise or background pixel hits will be flagged as such
+ *  by setting anegative pulse height. This allows separation into calibrate hit and noise hit maps.
  */
-
 #define FLAG_CHECK_ORDER 0x0080
 
 /** Flag to unmask and trim all pixels before the test starts. This might be a tad faster but one
  *  risks to get flooded with noise hits - which also might distrub the readout.
  */
 #define FLAG_FORCE_UNMASKED   0x0100
+
+/** Flag to dump all flawed events plus the surrounding ones to the logger on ERROR level.
+ *  Only use this to debug readout since it slows down decoding considerably.
+ */
+#define FLAG_DUMP_FLAWED_EVENTS 0x0200
+
+/** Flag to disable the collection of readback data from ROC headers. This might be desirable when sending
+ *  several million triggers at once since the amount of readback data collected can be huge.
+ */
+#define FLAG_DISABLE_READBACK_COLLECTION 0x0400
+
+/** Flag to disable cross-checking the TBM event id against a local counter.
+ */
+#define FLAG_DISABLE_EVENTID_CHECK 0x0800
+
+/** Flag to enable the collection of XOR sums from the DESER400 modules for every event.
+ */
+#define FLAG_ENABLE_XORSUM_LOGGING 0x1000
 
 
 /** Define a macro for calls to member functions through pointers 
@@ -104,10 +122,10 @@ namespace pxar {
    *  addresses from the HAL class, used e.g. in loop expansion routines.
    *  Follows advice of http://www.parashift.com/c++-faq/typedef-for-ptr-to-memfn.html
    */
-  typedef  std::vector<Event*> (hal::*HalMemFnRocParallel)(std::vector<uint8_t> rocids, std::vector<int32_t> parameter);
-  typedef  std::vector<Event*> (hal::*HalMemFnPixelParallel)(std::vector<uint8_t> rocids, uint8_t column, uint8_t row, std::vector<int32_t> parameter);
-  typedef  std::vector<Event*> (hal::*HalMemFnRocSerial)(uint8_t rocid, std::vector<int32_t> parameter);
-  typedef  std::vector<Event*> (hal::*HalMemFnPixelSerial)(uint8_t rocid, uint8_t column, uint8_t row, std::vector<int32_t> parameter);
+  typedef  std::vector<Event> (hal::*HalMemFnRocParallel)(std::vector<uint8_t> rocids, bool efficiency, std::vector<int32_t> parameter);
+  typedef  std::vector<Event> (hal::*HalMemFnPixelParallel)(std::vector<uint8_t> rocids, uint8_t column, uint8_t row, bool efficiency, std::vector<int32_t> parameter);
+  typedef  std::vector<Event> (hal::*HalMemFnRocSerial)(uint8_t rocid, bool efficiency, std::vector<int32_t> parameter);
+  typedef  std::vector<Event> (hal::*HalMemFnPixelSerial)(uint8_t rocid, uint8_t column, uint8_t row, bool efficiency, std::vector<int32_t> parameter);
 
 
 
@@ -248,7 +266,45 @@ namespace pxar {
      *
      *  In case of USB communication problems, pxar::UsbConnectionError is thrown.
      */
-    bool initDUT(uint8_t hubId,
+    bool initDUT(std::vector<uint8_t> hubIds,
+		 std::string tbmtype, 
+		 std::vector<std::vector<std::pair<std::string,uint8_t> > > tbmDACs,
+		 std::string roctype,
+		 std::vector<std::vector<std::pair<std::string,uint8_t> > > rocDACs,
+		 std::vector<std::vector<pixelConfig> > rocPixels,
+		 std::vector<uint8_t> rocI2Cs);
+
+    /** Alternative initializer method for the DUT (attached devices).
+     *
+     *  As above, but automatically assumes consecutively numbered I2C addresses for
+     *  all attached ROCs, starting from zero.
+     */
+    bool initDUT(std::vector<uint8_t> hubids,
+		 std::string tbmtype, 
+		 std::vector<std::vector<std::pair<std::string,uint8_t> > > tbmDACs,
+		 std::string roctype,
+		 std::vector<std::vector<std::pair<std::string,uint8_t> > > rocDACs,
+		 std::vector<std::vector<pixelConfig> > rocPixels);
+
+    /** Alternative initializer method for the DUT (attached devices).
+     *
+     *  As above, but only accepts one hub id for a single physical TBM
+     */
+    bool initDUT(uint8_t hubid,
+		 std::string tbmtype, 
+		 std::vector<std::vector<std::pair<std::string,uint8_t> > > tbmDACs,
+		 std::string roctype,
+		 std::vector<std::vector<std::pair<std::string,uint8_t> > > rocDACs,
+		 std::vector<std::vector<pixelConfig> > rocPixels,
+		 std::vector<uint8_t> rocI2Cs);
+
+    /** Alternative initializer method for the DUT (attached devices).
+     *
+     *  As above, but automatically assumes consecutively numbered I2C addresses for
+     *  all attached ROCs, starting from zero and only accepts one hub id for a
+     *  single physical TBM.
+     */
+    bool initDUT(uint8_t hubid,
 		 std::string tbmtype, 
 		 std::vector<std::vector<std::pair<std::string,uint8_t> > > tbmDACs,
 		 std::string roctype,
@@ -317,20 +373,25 @@ namespace pxar {
       *
       *  The signal identifier is checked against a dictionary to be valid.
       *  In case of an invalid signal identifier the output is turned off.
+      *
+      *  The channel variable allows to select a certain channel of the 
+      *  signal to be selected of applicable.
       */
-    bool SignalProbe(std::string probe, std::string name);
-
-
+    bool SignalProbe(std::string probe, std::string name, uint8_t channel = 0);
+    
+    std::vector<uint16_t> daqADC(std::string signal, uint8_t gain, uint16_t nSample, uint8_t source, uint8_t start);
+ 
     // TEST functions
 
     /** Set a DAC value on the DUT for one specific ROC
      *
-     *  The "rocid" parameter can be used to select a specific ROC to program.
+     *  The "rocID" parameter can be used to select a specific ROC to program.
+     *  The ROC is identified by its ID (counting all ROCs up from 0).
      *
      *  This function will both update the bookkeeping value in the pxar::dut
      *  struct and program the actual device.
      */
-    bool setDAC(std::string dacName, uint8_t dacValue, uint8_t rocid);
+    bool setDAC(std::string dacName, uint8_t dacValue, uint8_t rocI2C);
 
     /** Set a DAC value on the DUT for all enabled ROC
      *
@@ -349,8 +410,9 @@ namespace pxar {
      *  This function will both update the bookkeeping value in the pxar::dut
      *  struct and program the actual device.
      *
-     *  This function will set the respective register always in both cores of
-     *  the TBM specified.
+     *  This function will set the respective register in the TBM core specified
+     *  by the "tbmid". Be aware of the fact that TBM Alpha cores are numbered 
+     *  with even IDs (0,2,...) and TBM Beta cores with odd IDs (1,3,...).
      */
     bool setTbmReg(std::string regName, uint8_t regValue, uint8_t tbmid);
 
@@ -359,10 +421,19 @@ namespace pxar {
      *  This function will both update the bookkeeping value in the pxar::dut
      *  struct and program the actual device.
      *
-     *  This function will set the respective register always in both cores of
-     *  all TBMs configured in the DUT.
+     *  This function will set the respective register in the TBM core specified
+     *  by the "tbmid". Be aware of the fact that TBM Alpha cores are numbered 
+     *  with even IDs (0,2,...) and TBM Beta cores with odd IDs (1,3,...).
      */
     bool setTbmReg(std::string regName, uint8_t regValue);
+
+    /** Select the RDA channel of a layer 1 module for tbm readback
+    */
+    void selectTbmRDA(uint8_t tbmid);
+
+    /** Manually set the HUB_address in the testboard
+     */
+    void setHubID(uint8_t id);
 
     /** Method to scan a DAC range and measure the pulse height
      *
@@ -586,9 +657,6 @@ namespace pxar {
      */
     std::vector<pixel> getThresholdMap(std::string dacName, uint16_t flags, uint16_t nTriggers);
 
-    // FIXME missing documentation
-    int32_t getReadbackValue(std::string parameterName);
-
     /** Enable or disable the external clock source of the DTB.
      *  This function will return "false" if no external clock is present,
      *  clock is then left on internal.
@@ -601,6 +669,24 @@ namespace pxar {
      */
     void setClockStretch(uint8_t src, uint16_t delay, uint16_t width);
 
+    /** Set Signal Mode.
+	Define any testboard signal (e.g. clk) to the state constant high, constant low,
+	or normal oscillation.
+	signal: "clk", "ctr", "sda", or "tin"
+	mode: 0 (normal), 1 (low), 2 (high) or 3 (random)
+	When selecting (random) the speed has to be specified.
+     */
+    void setSignalMode(std::string signal, uint8_t mode, uint8_t speed = 0);
+
+    /** Set Signal Mode.
+	Define any testboard signal (e.g. clk) to the state constant high, constant low,
+	or normal oscillation.
+	signal: "clk", "ctr", "sda", or "tin"
+	mode: "normal", "low", "high" or "random"
+	speed: only necessary for the "random" mode
+     */
+    void setSignalMode(std::string signal, std::string mode, uint8_t speed = 0);
+
     // DAQ functions
 
     /** Function to set up and initialize a new data acquisition session (DAQ).
@@ -610,6 +696,9 @@ namespace pxar {
      *  pixels in question before calling pxar::daqStart()!
      */
     bool daqStart();
+    bool daqStart(const uint16_t flags);
+    bool daqStart(const int bufsize, const bool init);
+    bool daqStart(const uint16_t flags, const int bufsize, const bool init);
 
     /** Function to get back the DAQ status
      *
@@ -624,16 +713,47 @@ namespace pxar {
      *  DAQ buffer in percent.
      */
     bool daqStatus(uint8_t & perFull);
-    
+
+    /** Function to select the trigger source for the DAQ
+     *
+     *  Select Pattern Generator, internal random/cyclic trigger or external
+     *  synchronous or asynchronous trigger sources. The trigger source is
+     *  looked up from the dictionary, and the corresponding decoding module
+     *  is automatically selected.
+     *
+     *  The optional "timing" parameter is required for the DTB trigger generator
+     *  (random, periodic) and represents the trigger period in BC.
+     *
+     *  The trigger is only activated at pxar::daqStart() and is stopped again at
+     *  pxar::daqStop().
+     */
+    bool daqTriggerSource(std::string triggerSource, uint32_t rate = 0);
+
+    /** Function to send a single (direct) signal to the DUT.
+     *
+     *  This first configures the trigger source for direct sending of single
+     *  signals, routes the signal to the DUT and then resets the trigger source
+     *  to the one previously configured. The possible trigger signals are matched
+     *  against the pattern dictionary.
+     */
+    bool daqSingleSignal(std::string triggerSignal);
+
     /** Function to read out the earliest pxar::Event in buffer from the current
-     *  data acquisition session. If no Event is buffered, the function will 
-     *  wait for the next Event to arrive and then return it.
+     *  data acquisition session.
+     *
+     *  This function can throw a pxar::DataDecodingError exception in case severe
+     *  problems were encountered during the readout.
+     *
+     *  If no event is available the function will throw a pxar::DataNoEvent
+     *  exception. Catching this allows constant polling for new events.
      */
     Event daqGetEvent();
 
     /** Function to read out the earliest raw data record in buffer from the 
-     *  current data acquisition session. If no Event is buffered, the function 
-     *  will wait for the next Event to arrive and then return it.
+     *  current data acquisition session.
+     *
+     *  If no event is available the function will throw a pxar::DataNoEvent
+     *  exception. Catching this allows constant polling for new events.
      */
     rawEvent daqGetRawEvent();
 
@@ -659,30 +779,79 @@ namespace pxar {
     /** Function to stop the running data acquisition
      */
     bool daqStop();
+    bool daqStop(const bool init);
 
     /** Function to return the full currently available raw event buffer from
      *  the testboard RAM. No decoding is performed, the data stream is just
      *  split into single pxar::rawEvent objects. This function returns the
      *  raw events from either of the deserializer modules.
+     *
+     *  If no raw events are available the function will throw a pxar::DataNoEvent
+     *  exception. Catching this allows constant polling for new events.
      */
     std::vector<rawEvent> daqGetRawEventBuffer();
 
     /** Function to return the full currently available raw data buffer from the
      *  testboard RAM. Neither decoding nor splitting is performed, this function
      *  returns the raw data blob from either of the deserializer modules.
+     *
+     *  If no data is available the function will throw a pxar::DataNoEvent
+     *  exception. Catching this allows constant polling for new data.
      */
     std::vector<uint16_t> daqGetBuffer();
 
     /** Function to return the full currently available pxar::Event buffer from the 
      *  testboard RAM. All data is decoded and the function returns decoded pixels 
      *  separated in pxar::Events with additional header information available.
+     *
+     *  This function can throw a pxar::DataDecodingError exception in case severe
+     *  problems were encountered during the readout.
+     *
+     *  If no events are available the function will throw a pxar::DataNoEvent
+     *  exception. Catching this allows constant polling for new events.
      */
     std::vector<Event> daqGetEventBuffer();
 
-    /** Function that returns the number of pixel decoding errors found in the
-     *  last (non-raw) DAQ readout.
+    /** Function to return the full currently available ROC slow readback value
+     *  buffer. The data is stored until a new DAQ session or test is called and
+     *  can be fetched once (deleted at read time). The return vector contains
+     *  one vector of readback values for every ROC found in the readout chain.
      */
-    uint32_t daqGetNDecoderErrors();
+    std::vector<std::vector<uint16_t> > daqGetReadback();
+
+    /** Function to return the recorded XOR sum of the DESER400 module for the
+     *  selected channel. The data is stored until a new DAQ session or test is 
+     *  called and can be fetched once (deleted at read time). The return vector 
+     *  contains all recorded XOR sum values of the DAQ channel.
+     */
+    std::vector<uint8_t> daqGetXORsum(uint8_t channel);
+
+    /** Function that returns a class object of the type pxar::statistics
+     *  containing all collected error statistics from the last (non-raw)
+     *  DAQ readout or API test call. Statistics can be fetched once and
+     *  are then reset.
+     *
+     *  It is meant for one-time-reading which means after calling 
+     *  pxarCore::getStatistics() the object will be returned and the internal
+     *  statistics reset. Calling getStatistics() a second time will yield an
+     *  empty object. This implies that if you want to check different values
+     *  of the struct you have to fetch it and store it locally before
+     *  accessing class members such as statistics::pixel_errors() instead of
+     *  calling pxarCore::getStatistics().pixel_errors().
+     *
+     *  Note that the statistics class object gets filled by the decoder
+     *  pipeworks. This has an implication for people running their own DAQ
+     *  sessions using pxarCore::daqStart() and pxarCore::daqStop().
+     *  If you fetch your data via pxarCore::daqGetRawEvent() or
+     *  pxarCore::daqGetRawEventBuffer() the statistics object will remain empty
+     *  because the data has not been passed through the decoder. If you run
+     *  pxarCore::daqGetEvent() or pxarCore::daqGetEventBuffer() the statistics
+     *  object will be properly filled. Events will continue to be added to
+     *  these numbers until you either read them out (reading statistics resets
+     *  the counters) or you re-started a new DAQ session (pxarCore::daqStart()
+     *  initialises the counters to zero).
+     */
+    statistics getStatistics();
 
     /** DUT object for book keeping of settings
      */
@@ -693,7 +862,15 @@ namespace pxar {
      *  Returns true if everything is setup correctly for operation
      */
     bool status();
-    
+
+    /** Get ADC value
+     */
+    uint16_t GetADC( uint8_t rpc_par1 ) ;
+
+    void setReportingLevel(std::string logLevel);
+
+    std::string getReportingLevel();
+
   private:
 
     /** Private HAL object for the API to access hardware routines
@@ -708,35 +885,30 @@ namespace pxar {
      *  the user, i.e. select the full-ROC test instead of the pixel-by-pixel
      *  function, all depending on the configuration of the DUT.
      */
-    std::vector<Event*> expandLoop(HalMemFnPixelSerial pixelfn, HalMemFnPixelParallel multipixelfn, HalMemFnRocSerial rocfn, HalMemFnRocParallel multirocfn, std::vector<int32_t> param, uint16_t flags = 0);
-
-    /** Merges all consecutive triggers into one pxar::Event. This function deletes the original event data after
-     *  merging! 
-     */
-    std::vector<Event*> condenseTriggers(std::vector<Event*> data, uint16_t nTriggers, bool efficiency);
+    std::vector<Event> expandLoop(HalMemFnPixelSerial pixelfn, HalMemFnPixelParallel multipixelfn, HalMemFnRocSerial rocfn, HalMemFnRocParallel multirocfn, std::vector<int32_t> param, bool efficiency, uint16_t flags = 0);
     
     /** Repacks map data from (possibly) several ROCs into one long vector
      *  of pixels.
      */
-    std::vector<pixel> repackMapData (std::vector<Event*> data, uint16_t nTriggers, uint16_t flags, bool efficiency);
+    std::vector<pixel> repackMapData (std::vector<Event> &data, uint16_t flags);
 
     /** Repacks map data from (possibly) several ROCs into one long vector
      *  of pixels and returns the threshold value.
      */
-    std::vector<pixel> repackThresholdMapData (std::vector<Event*> data, uint8_t dacStep, uint8_t dacMin, uint8_t dacMax, uint8_t thresholdlevel, uint16_t nTriggers, uint16_t flags);
+    std::vector<pixel> repackThresholdMapData (std::vector<Event> &data, uint8_t dacStep, uint8_t dacMin, uint8_t dacMax, uint8_t thresholdlevel, uint16_t nTriggers, uint16_t flags);
 
     /** Repacks DAC scan data into pairs of DAC values with fired pxar::pixel vectors.
      */
-    std::vector< std::pair<uint8_t, std::vector<pixel> > > repackDacScanData (std::vector<Event*> data, uint8_t dacStep, uint8_t dacMin, uint8_t dacMax, uint16_t nTriggers, uint16_t flags, bool efficiency);
+    std::vector< std::pair<uint8_t, std::vector<pixel> > > repackDacScanData (std::vector<Event> &data, uint8_t dacStep, uint8_t dacMin, uint8_t dacMax, uint16_t flags);
 
     /** Repacks DAC scan data into pairs of DAC values with fired pxar::pixel vectors and return the threshold value.
      */
-    std::vector<std::pair<uint8_t,std::vector<pixel> > > repackThresholdDacScanData (std::vector<Event*> data, uint8_t dac1step, uint8_t dac1min, uint8_t dac1max, uint8_t dac2step, uint8_t dac2min, uint8_t dac2max, uint8_t thresholdlevel, uint16_t nTriggers, uint16_t flags);
+    std::vector<std::pair<uint8_t,std::vector<pixel> > > repackThresholdDacScanData (std::vector<Event> &data, uint8_t dac1step, uint8_t dac1min, uint8_t dac1max, uint8_t dac2step, uint8_t dac2min, uint8_t dac2max, uint8_t thresholdlevel, uint16_t nTriggers, uint16_t flags);
 
     /** repacks (2D) DAC-DAC scan data into pairs of DAC values with
      *  vectors of the fired pixels.
      */
-    std::vector< std::pair<uint8_t, std::pair<uint8_t, std::vector<pixel> > > > repackDacDacScanData (std::vector<Event*> data, uint8_t dac1step, uint8_t dac1min, uint8_t dac1max, uint8_t dac2step, uint8_t dac2min, uint8_t dac2max, uint16_t nTriggers, uint16_t flags, bool efficiency);
+    std::vector< std::pair<uint8_t, std::pair<uint8_t, std::vector<pixel> > > > repackDacDacScanData (std::vector<Event> &data, uint8_t dac1step, uint8_t dac1min, uint8_t dac1max, uint8_t dac2step, uint8_t dac2min, uint8_t dac2max, uint16_t flags);
 
     /** Helper function for conversion from string to register value
      *
@@ -780,15 +952,21 @@ namespace pxar {
      */
     void MaskAndTrim(bool trim, std::vector<rocConfig>::iterator rocit);
 
+  public:
+  
     /** Helper function to setup the attached devices for operation using
      *  calibrate pulses.
      *
      *  It sets the Pixel Unit Cell (PUC) Calibrate bit for
      *  every pixels enabled in the test range (those for which the "enable" 
      *  flag has been set using the dut::testPixel() functions) 
+     * 
+     * Disclaimer: use at your own risk, don't rely on this method staying public
      */
     void SetCalibrateBits(bool enable);
-
+    
+   private:
+   
     /** Helper function to check validity of the pattern generator settings
      *  coming from the user space.
      *
@@ -813,11 +991,6 @@ namespace pxar {
      */
     uint32_t getPatternGeneratorDelaySum(std::vector<std::pair<uint16_t,uint8_t> > &pg_setup);
 
-    /** Helper function to update the internaly cached number of decoder errors
-     *  with the number found in the data sample passed to the function
-     */
-    void getDecoderErrorCount(std::vector<Event*> &data);
-
     /** Status of the DAQ
      */
     bool _daq_running;
@@ -826,9 +999,9 @@ namespace pxar {
      */
     uint32_t _daq_buffersize;
 
-    /** Number of pixel decoding errors in last DAQ readout */
-    uint32_t _ndecode_errors_lastdaq;
-
+    /** Warned the user about not initializing the DUT */
+    bool _daq_startstop_warning;
+    
   }; // class pxarCore
 
 
@@ -844,7 +1017,7 @@ namespace pxar {
     /** Default DUT constructor
      */
     dut() : _initialized(false), _programmed(false), roc(), tbm(), sig_delays(),
-      va(0), vd(0), ia(0), id(0), pg_setup(), pg_sum(0) {}
+      va(0), vd(0), ia(0), id(0), pg_setup(), pg_sum(0), trigger_source(TRG_SEL_PG_DIR) {}
 
     // GET functions to read information
 
@@ -856,9 +1029,17 @@ namespace pxar {
      */
     size_t getNEnabledPixels(uint8_t rocid);
 
+    /** Function returning the number of enabled pixels on all ROCs:
+     */
+    size_t getNEnabledPixels();
+
     /** Function returning the number of masked pixels on a specific ROC:
      */
     size_t getNMaskedPixels(uint8_t rocid);
+
+    /** Function returning the number of masked pixels on all ROCs:
+     */
+    size_t getNMaskedPixels();
 
     /** Function returning the number of enabled TBMs:
      */
@@ -868,6 +1049,10 @@ namespace pxar {
      */
     size_t getNTbms();
 
+    /** Function returning the TBM type programmed:
+     */
+    std::string getTbmType();
+
     /** Function returning the number of enabled ROCs:
      */
     size_t getNEnabledRocs();
@@ -876,9 +1061,29 @@ namespace pxar {
      */
     size_t getNRocs();
 
-    /** Function returning the enabled pixels configs for a specific ROC:
+    /** Function returning the ROC type programmed:
+     */
+    std::string getRocType();
+
+    /** Function returning the enabled pixels configs for a specific ROC ID:
      */
     std::vector< pixelConfig > getEnabledPixels(size_t rocid);
+
+    /** Function returning the enabled pixels configs for a ROC with given I2C address:
+     */
+    std::vector< pixelConfig > getEnabledPixelsI2C(size_t roci2c);
+
+    /** Function returning the enabled pixels configs for all ROCs:
+     */
+    std::vector< pixelConfig > getEnabledPixels();
+
+    /** Function returning all masked pixels configs for a specific ROC:
+     */
+    std::vector< pixelConfig > getMaskedPixels(size_t rocid);
+
+    /** Function returning all masked pixels configs for all ROCs:
+     */
+    std::vector< pixelConfig > getMaskedPixels();
 
     /** Function returning the enabled ROC configs
      */
@@ -927,6 +1132,10 @@ namespace pxar {
     /** Function to read current values from all DAC on TBM tbmId
      */
     std::vector< std::pair<std::string,uint8_t> > getTbmDACs(size_t tbmId);
+
+    /** Function returning the token chain lengths:
+     */
+    std::vector<uint8_t> getTbmChainLengths(size_t tbmId);
 
     /** Helper function to print current values from all DAC on ROC rocId
      *  to stdout
@@ -1008,10 +1217,6 @@ namespace pxar {
      */
     std::vector< bool > getEnabledColumns(size_t roci2c);
 
-    /** DUT hub ID
-     */
-    uint8_t hubId;
-
     /** DUT member to hold all ROC configurations
      */
     std::vector< rocConfig > roc;
@@ -1036,6 +1241,10 @@ namespace pxar {
      *  command list
      */
     uint32_t pg_sum;
+
+    /** DUT member to store the selected trigger source to be activated
+     */
+    uint16_t trigger_source;
 
   }; //class DUT
 

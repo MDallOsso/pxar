@@ -38,6 +38,7 @@ private:
 	std::string fInputFile;
 	std::string fOutputFile;
 	bool	fUnMaskAll;
+	bool	fExtClk;
 	bool	fParFillTree;
 
 	bool    fParOutOfRange;
@@ -47,6 +48,7 @@ private:
 	std::vector<std::pair<int, int> > fPIXm;
 	uint16_t fPeriod;
 	int		fCheckFreq;
+	int		fNpix;
 
 	ClassDef(PixTestPattern, 1)
 

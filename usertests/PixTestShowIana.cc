@@ -75,10 +75,10 @@ uint8_t PixTestShowIana::readRocADC(uint8_t adc)
     fApi->setDAC("readback", adc);
 
     //read 32 events
-    fApi->daqStart();
     fApi->daqTrigger(32);
-    fApi->daqStop();
-    vector<pxar::Event> events = fApi->daqGetEventBuffer();
+    vector<pxar::Event> events;
+    try { events = fApi->daqGetEventBuffer(); }
+    catch(pxar::DataNoEvent &) {}
     
     if ( events.size()<32 ){
         cout << "only got " << events.size() << endl;
@@ -94,10 +94,10 @@ uint8_t PixTestShowIana::readRocADC(uint8_t adc)
         pxar::Event & e= *ie; 
 
         if ( ( n>=0 ) && (n<16) ){
-            value = (value << 1 ) + (e.header & 1);
+	    value = (value << 1 ) + (e.getHeader() & 1);
             n++;
         }
-        else if ( ((e.header & 2) >>1) == 1 ){
+        else if ( ((e.getHeader() & 2) >>1) == 1 ){
             n=0;
         }
     }
@@ -120,7 +120,7 @@ void PixTestShowIana::doTest()
   PixTest::update();
 
    TH1D* h1 = new TH1D( 
-    Form( "iatb_vs vana_roc_%02d",0),
+    Form( "iatb_vs_vana_roc_%02d",0),
     Form( "iatb vs vana roc %2d",0),
             256, 0,256) ;
    h1->SetMinimum(0);
@@ -137,14 +137,14 @@ void PixTestShowIana::doTest()
   //size_t nRocs = fPixSetup->getConfigParameters()->getNrocs();
   vector<uint8_t> dac2save;
   
-  
-  for(uint8_t dacvalue=0; dacvalue<255; dacvalue++){
+  fApi->daqStart();
+
+  for(int dacvalue=0; dacvalue<=256; dacvalue++){
     fApi->setDAC("Vana", dacvalue);
     double ia1 = fApi->getTBia()*1e3;
     double ia=0;
     int n=0;
     for(;n<10; n++){
-        //usleep(10);// not for windoze
         ia = fApi->getTBia()*1e3;
         if ( TMath::Abs(ia-ia1) < 1 ) break;
         ia1=ia;
@@ -156,6 +156,8 @@ void PixTestShowIana::doTest()
     h2->SetBinContent( dacvalue, ia2);
   }
   
+  fApi->daqStop();
+
   // plot:
 
   fHistList.push_back(h1);

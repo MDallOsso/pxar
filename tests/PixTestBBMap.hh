@@ -1,8 +1,10 @@
-// -- author: Wolfram Erdmann
 #ifndef PIXTESTBBMAP_H
 #define PIXTESTBBMAP_H
 
 #include "PixTest.hh"
+
+#include <TH1.h>
+#include <TSpectrum.h>
 
 class DLLEXPORT PixTestBBMap: public PixTest {
 public:
@@ -10,17 +12,18 @@ public:
   PixTestBBMap();
   virtual ~PixTestBBMap();
   virtual bool setParameter(std::string parName, std::string sval); 
-  void init(); 
-  void setToolTips();
+  virtual void init(); 
+  virtual void resetDirectory();
+  // virtual void writeOutput();
+  virtual void setToolTips();
 
   void doTest(); 
-  void output4moreweb();
+  int  fitPeaks(TH1D *h, TSpectrum &s, int npeaks);
 
 private:
   int          fParNtrig; 
   int          fParVcalS; 
-  int          fParXtalk; 
-  
+  int          fDumpAll, fDumpProblematic;
   ClassDef(PixTestBBMap, 1); 
 
 };

@@ -4,7 +4,9 @@
 #include "rpc_calls.h"
 #include "api.h"
 #include "datapipe.h"
+#include "datasource_dtb.h"
 #include "constants.h"
+#include "timer.h"
 
 namespace pxar {
 
@@ -12,7 +14,7 @@ namespace pxar {
   {
 
   public:
-    /** Default constructor for cerating a new HAL instance. Takes
+    /** Default constructor for creating a new HAL instance. Takes
      *  a testboard USB ID name as parameter and tries to connect to
      *  the board. Exception is thrown if connection fails.
      */
@@ -54,7 +56,11 @@ namespace pxar {
 
     /** Initialize attached TBMs with their settings and configuration
      */
-    void initTBMCore(uint8_t type, std::map< uint8_t,uint8_t > regVector);
+    void initTBMCore(tbmConfig tbm);
+
+    /** Change the type of the TBM type member in HAL
+     */
+    void setTBMType(uint8_t type);
 
     /** Initialize attached ROCs with their settings and configuration
      *  This is the startup-routine for single ROCs. It first powers up the
@@ -79,10 +85,30 @@ namespace pxar {
      */
     void Poff();
 
+    /** select signal mode
+     */
+    void SigSetMode(uint8_t signal, uint8_t mode);
+
+    /** set signal to random output PRBS
+     */
+    void SigSetPRBS(uint8_t signal, uint8_t speed);
+    
+    /** select termination for RDA/TOUT to LCDS (for modules)
+     */
+    void SigSetLCDS();
+
+    /** select termination for RDA/TOUT to LVDS (for single ROCs)
+     */
+    void SigSetLVDS();
+
     /** Set HubID
      */
-    void setHubId(uint8_t hubid) {hubId = hubid;}
+    void setHubId(uint8_t hubid);
 
+    /** Set dual HubID for Layer 1 modules:
+     */
+    void setHubId(uint8_t hub0, uint8_t hub1);
+    
     /** Set a DAC on a specific ROC with I2C address roci2c
      */
     bool rocSetDAC(uint8_t roci2c, uint8_t dacId, uint8_t dacValue);
@@ -92,14 +118,18 @@ namespace pxar {
      */
     bool rocSetDACs(uint8_t roci2c, std::map< uint8_t, uint8_t > dacPairs);
 
-    /** Set a register on a specific TBM tbmId
+    /** Select the RDA channel of a layer 1 module for tbm readback
+    */
+    void tbmSelectRDA(uint8_t rda_id);
+
+    /** Set a register on a specific TBM at hubid
      */
-    bool tbmSetReg(uint8_t regId, uint8_t regValue);
+    bool tbmSetReg(uint8_t hubid, uint8_t regId, uint8_t regValue, bool flush = true);
 
     /** Set all registers on a specific TBM tbmId
      *  registers are provided as map of uint8_t,uint8_t pairs with Reg Id and value.
      */
-    bool tbmSetRegs(std::map< uint8_t, uint8_t > regPairs);
+    bool tbmSetRegs(uint8_t hubid, uint8_t core, std::map< uint8_t, uint8_t > regPairs);
 
     /** Function to set and update the pattern generator command list on the DTB
      */
@@ -145,6 +175,14 @@ namespace pxar {
      */
     void SignalProbeD2(uint8_t signal);
 
+    /** Selects DESER400 "signal" as output for the DTB probe channel D2 (digital) 
+     */
+    void SignalProbeDeserD1(uint8_t deser, uint8_t signal);
+
+    /** Selects DESER400 "signal" as output for the DTB probe channel D2 (digital) 
+     */
+    void SignalProbeDeserD2(uint8_t deser, uint8_t signal);
+
     /** Selects "signal" as output for the DTB probe channel A1 (analog) 
      */
     void SignalProbeA1(uint8_t signal);
@@ -153,7 +191,24 @@ namespace pxar {
      */
     void SignalProbeA2(uint8_t signal);
 
-
+    /** Selects input for the ADC 
+     */
+    void SignalProbeADC(uint8_t signal, uint8_t gain);
+    
+    /** Record data using the DTB ADC. The following parameters are available:
+	analog_probe = signal to be sampled
+	gain = adc gain  (higher values = higher gain but also slower)
+	nSample = max. number of samples to be taken
+	source  = start signal
+	      0 = none (off)
+	      1 = pg_sync
+	      2 = i2c
+	      3 = token in
+	start   = delay after start signal
+	stop    = not sure, takes nSample samples when stop is 0
+      */
+    std::vector<uint16_t> daqADC(uint8_t analog_probe, uint8_t gain, uint16_t nSample, uint8_t source, uint8_t start, uint8_t stop = 0);
+    
     // TEST COMMANDS
 
     /** Function to return Module maps of calibration pulses
@@ -163,95 +218,110 @@ namespace pxar {
      *  The roci2c vector parameter allows to select ROCs with arbitrary I2C addresses. Usually module
      *  I2C addresses range from 0-15 but for special purposes this might be different.
      */
-    std::vector<Event*> MultiRocAllPixelsCalibrate(std::vector<uint8_t> roci2cs, std::vector<int32_t> parameter);
+    std::vector<Event> MultiRocAllPixelsCalibrate(std::vector<uint8_t> roci2cs, bool efficiency, std::vector<int32_t> parameter);
 
     /** Function to return ROC maps of calibration pulses
      *  Public flags contain possibility to route the calibrate pulse via the sensor (FLAG_CALS) and 
      *  possibility for cross-talk measurement (FLAG_XTALK)
      */
-    std::vector<Event*> SingleRocAllPixelsCalibrate(uint8_t roci2c, std::vector<int32_t> parameter);
+    std::vector<Event> SingleRocAllPixelsCalibrate(uint8_t roci2c, bool efficiency, std::vector<int32_t> parameter);
 
     /** Function to return "Pixel maps" of calibration pulses, i.e. pinging a single pixel on multiple ROCs.
      *  Public flags contain possibility to route the calibrate pulse via the sensor (FLAG_CALS) and
      *  possibility for cross-talk measurement (FLAG_XTALK)
      */
-    std::vector<Event*> MultiRocOnePixelCalibrate(std::vector<uint8_t> roci2cs, uint8_t column, uint8_t row, std::vector<int32_t> parameter);
+    std::vector<Event> MultiRocOnePixelCalibrate(std::vector<uint8_t> roci2cs, uint8_t column, uint8_t row, bool efficiency, std::vector<int32_t> parameter);
 
     /** Function to return "Pixel maps" of calibration pulses, i.e. pinging a single pixel on one ROC.
      *  Public flags contain possibility to route the calibrate pulse via the sensor (FLAG_CALS) and
      *  possibility for cross-talk measurement (FLAG_XTALK)
      */
-    std::vector<Event*> SingleRocOnePixelCalibrate(uint8_t roci2c, uint8_t column, uint8_t row, std::vector<int32_t> parameter);
+    std::vector<Event> SingleRocOnePixelCalibrate(uint8_t roci2c, uint8_t column, uint8_t row, bool efficiency, std::vector<int32_t> parameter);
 
     /** Function to return ROC maps of thresholds
      *  Public flags contain possibility to route the calibrate pulse via the sensor (FLAG_CALS), cross-talk
      *  settings (FLAG_XTALK) and the possibility to reverse the scanning (FLAG_RISING).
      *  The parameters additionally contain the DAC register to be scanned for threshold setting.
      */
-    std::vector<Event*> RocThresholdMap(uint8_t roci2c, std::vector<int32_t> parameter);
+    std::vector<Event> RocThresholdMap(uint8_t roci2c, bool efficiency, std::vector<int32_t> parameter);
 
     /** Function to return "Pixel maps" of threshold values, i.e. measuring the threshold for a single pixel.
      *  Public flags contain possibility to route the calibrate pulse via the sensor (FLAG_CALS), cross-talk
      *  settings (FLAG_XTALK) and the possibility to reverse the scanning (FLAG_RISING).
      *  The parameters additionally contain the DAC register to be scanned for threshold setting.
      */
-    std::vector<Event*> PixelThresholdMap(uint8_t roci2c, uint8_t column, uint8_t row, std::vector<int32_t> parameter);
+    std::vector<Event> PixelThresholdMap(uint8_t roci2c, uint8_t column, uint8_t row, bool efficiency, std::vector<int32_t> parameter);
 
     /** Function to scan a given DAC for all pixels on multiple ROCs, selected via their I2C address
      *  Public flags contain possibility to route the calibrate pulse via the sensor (FLAG_CALS) and
      *  possibility for cross-talk measurement (FLAG_XTALK)
      */
-    std::vector<Event*> MultiRocAllPixelsDacScan(std::vector<uint8_t> roci2cs, std::vector<int32_t> parameter);
+    std::vector<Event> MultiRocAllPixelsDacScan(std::vector<uint8_t> roci2cs, bool efficiency, std::vector<int32_t> parameter);
 
     /** Function to scan a given DAC for all pixels on one ROC
      *  Public flags contain possibility to route the calibrate pulse via the sensor (FLAG_CALS) and
      *  possibility for cross-talk measurement (FLAG_XTALK)
      */
-    std::vector<Event*> SingleRocAllPixelsDacScan(uint8_t roci2c, std::vector<int32_t> parameter);
+    std::vector<Event> SingleRocAllPixelsDacScan(uint8_t roci2c, bool efficiency, std::vector<int32_t> parameter);
 
     /** Function to scan a given DAC for a pixel on multiple ROCs, selected via their I2C address
      *  Public flags contain possibility to route the calibrate pulse via the sensor (FLAG_CALS) and
      *  possibility for cross-talk measurement (FLAG_XTALK)
      */
-    std::vector<Event*> MultiRocOnePixelDacScan(std::vector<uint8_t> roci2cs, uint8_t column, uint8_t row, std::vector<int32_t> parameter);
+    std::vector<Event> MultiRocOnePixelDacScan(std::vector<uint8_t> roci2cs, uint8_t column, uint8_t row, bool efficiency, std::vector<int32_t> parameter);
 
     /** Function to scan a given DAC for a pixel on one ROC
      *  Public flags contain possibility to route the calibrate pulse via the sensor (FLAG_CALS) and
      *  possibility for cross-talk measurement (FLAG_XTALK)
      */
-    std::vector<Event*> SingleRocOnePixelDacScan(uint8_t roci2c, uint8_t column, uint8_t row, std::vector<int32_t> parameter);
+    std::vector<Event> SingleRocOnePixelDacScan(uint8_t roci2c, uint8_t column, uint8_t row, bool efficiency, std::vector<int32_t> parameter);
 
 
     /** Function to scan two given DAC ranges for all pixels on multiple ROCs, selected via their I2C address
      *  Public flags contain possibility to route the calibrate pulse via the sensor (FLAG_CALS) and
      *  possibility for cross-talk measurement (FLAG_XTALK)
      */
-    std::vector<Event*> MultiRocAllPixelsDacDacScan(std::vector<uint8_t> roci2cs, std::vector<int32_t> parameter);
+    std::vector<Event> MultiRocAllPixelsDacDacScan(std::vector<uint8_t> roci2cs, bool efficiency, std::vector<int32_t> parameter);
 
     /** Function to scan two given DAC ranges for all pixels on one ROC
      *  Public flags contain possibility to route the calibrate pulse via the sensor (FLAG_CALS) and
      *  possibility for cross-talk measurement (FLAG_XTALK)
      */
-    std::vector<Event*> SingleRocAllPixelsDacDacScan(uint8_t roci2c, std::vector<int32_t> parameter);
+    std::vector<Event> SingleRocAllPixelsDacDacScan(uint8_t roci2c, bool efficiency, std::vector<int32_t> parameter);
 
     /** Function to scan two given DAC ranges for a pixel on multiple ROCs, selected via their I2C address
      *  Public flags contain possibility to route the calibrate pulse via the sensor (FLAG_CALS) and
      *  possibility for cross-talk measurement (FLAG_XTALK)
      */
-    std::vector<Event*> MultiRocOnePixelDacDacScan(std::vector<uint8_t> roci2cs, uint8_t column, uint8_t row, std::vector<int32_t> parameter);
+    std::vector<Event> MultiRocOnePixelDacDacScan(std::vector<uint8_t> roci2cs, uint8_t column, uint8_t row, bool efficiency, std::vector<int32_t> parameter);
 
     /** Function to scan two given DAC ranges for a pixel on one ROC
      *  Public flags contain possibility to route the calibrate pulse via the sensor (FLAG_CALS) and
      *  possibility for cross-talk measurement (FLAG_XTALK)
      */
-    std::vector<Event*> SingleRocOnePixelDacDacScan(uint8_t roci2c, uint8_t column, uint8_t row, std::vector<int32_t> parameter);
+    std::vector<Event> SingleRocOnePixelDacDacScan(uint8_t roci2c, uint8_t column, uint8_t row, bool efficiency, std::vector<int32_t> parameter);
 
 
     // DAQ functions:
     /** Starting a new data acquisition session
      */
-    void daqStart(uint8_t deser160phase, uint8_t tbmtype, uint32_t buffersize = DTB_SOURCE_BUFFER_SIZE);
+    void daqStart(uint16_t flags, uint8_t deser160phase, uint32_t buffersize = DTB_SOURCE_BUFFER_SIZE);
 
+    /** Select the trigger source as given in "source":
+     */
+    void daqTriggerSource(uint16_t source);
+
+    /** Send a single signal via the DTB to the DUT. This function
+     *  first configures the trigger source TRG_SEL_SINGLE_DIR 
+     *  (direct sending of signals, no softTBM), then sends the 
+     *  signal and finally resets the trigger source to the previous
+     *  setting (from hal::_currentTrgSrc)
+     */
+    void daqTriggerSingleSignal(uint8_t signal);
+
+    void daqTriggerGenRandom(uint32_t rate);
+    void daqTriggerGenPeriodic(uint32_t period);
+    
     /** Firing the pattern generator nTrig times with the programmed patterns
      */
     void daqTrigger(uint32_t nTrig, uint16_t period);
@@ -263,6 +333,10 @@ namespace pxar {
     /** Halt the pattern generator loop - no more triggers
      */
     void daqTriggerLoopHalt();
+
+    /** Activating the external trigger input of the pattern generator
+     */
+    void daqTriggerPgExtern();
 
     /** Stopping the current DAQ session. This is not resetting the data buffers.
      *  All DAQ channels are stopped.
@@ -279,19 +353,33 @@ namespace pxar {
 
     /** Reading out the full undecoded DAQ buffer
      */
-    std::vector<rawEvent*> daqAllRawEvents();
+    std::vector<rawEvent> daqAllRawEvents();
 
     /** Read the next decoded Event from the FIFO buffer
      */
-    Event* daqEvent();
+    Event daqEvent();
 
     /** Read the next raw (undecoded) Event from the FIFO buffer
      */
-    rawEvent* daqRawEvent();
+    rawEvent daqRawEvent();
 
     /** Read all remaining decoded Events from the FIFO buffer
      */
-    std::vector<Event*> daqAllEvents();
+    std::vector<Event> daqAllEvents();
+
+    /** Return the current decoding statistics for all channels:
+     */
+    statistics daqStatistics();
+
+    /** Return all readback values for the last readout. Return format is a vector containing
+     *  one vector of uint16_t radback values for every ROC in the readout chain.
+     */
+    std::vector<std::vector<uint16_t> > daqReadback();
+
+    /** Return all XOR sum values for the selected channel. Return format is a vector containing
+     *  all samples XOR sums for the respective DESER400 channel.
+     */
+    std::vector<uint8_t> daqXORsum(uint8_t channel);
 
     /** Clears the DAQ buffer on the DTB, deletes all previously taken and not yet read out data!
      */
@@ -319,6 +407,10 @@ namespace pxar {
      */
     void PixelSetCalibrate(uint8_t roci2c, uint8_t column, uint8_t row, uint16_t flags);
 
+    /** Set the Calibrate bit and CALS setting of a full ROC, read from avector of pxar::pixelConfig
+     */
+    void RocSetCalibrate(uint8_t roci2c, std::vector<pixelConfig> pixels, uint16_t flags);
+
     /** Reset all Calibrate bits and clear the ROC I2C address:
      */
     void RocClearCalibrate(uint8_t roci2c);
@@ -326,6 +418,10 @@ namespace pxar {
     /** Set the Column Enable bit for all columns
      */
     void AllColumnsSetEnable(uint8_t roci2c, bool enable);
+
+    /** Get ADC value
+     */
+    uint16_t GetADC(uint8_t rpc_par1);
 
   private:
 
@@ -340,15 +436,23 @@ namespace pxar {
     bool _initialized;
 
     /** Compatibility status of the HAL RPC calls with the DTB. If not set the
-     *  DTB cannot be initialized, onlz flashing is allowed then.
+     *  DTB cannot be initialized, only flashing is allowed then.
      */
     bool _compatible;
 
     // FIXME can't we find a smarter solution to this?!
-    uint8_t tbmtype;
+    uint8_t m_tbmtype;
+    uint16_t m_adctimeout;
+    uint8_t m_tindelay;
+    uint8_t m_toutdelay;
     uint8_t deser160phase;
-    uint8_t rocType;
-    uint8_t hubId;
+    uint8_t m_roctype;
+    uint8_t m_roccount;
+    std::vector<uint8_t> m_tokenchains;
+    // Store which channels are active:
+    std::vector<bool> m_daqstatus;
+
+    uint16_t _currentTrgSrc;
 
     /** Print the info block with software and firmware versions,
      *  MAC and USB ids etc. read from the connected testboard
@@ -371,7 +475,16 @@ namespace pxar {
      *  expected for the upcoming test. This function only supplies debug output
      *  and has no further effect on the data transmission or similar.
      */
-    void estimateDataVolume(uint32_t events, uint8_t nROCs, uint8_t nTBMs);
+    void estimateDataVolume(uint32_t events, uint8_t nROCs);
+
+    /** Merges all consecutive triggers into one pxar::Event. This function deletes the original event data after
+     *  merging! 
+     */
+    std::vector<Event> condenseTriggers(std::vector<Event> &data, uint16_t nTriggers, bool efficiency);
+
+    /** Helper function reading data, passing it to the condenser and then returns it to the test function
+     */
+    void addCondensedData(std::vector<Event> &data, uint16_t nTriggers, bool efficiency, timer t);
 
     // TESTBOARD SET COMMANDS
     /** Set the testboard analog current limit
@@ -403,21 +516,9 @@ namespace pxar {
     std::vector<uint16_t> * daqReadChannel(uint8_t channel);
 
     // Our default pipe work buffers:
-    dtbSource src0;
-    dtbSource src1;
-    dtbSource src2;
-    dtbSource src3;
-
-    dtbEventSplitter splitter0;
-    dtbEventSplitter splitter1;
-    dtbEventSplitter splitter2;
-    dtbEventSplitter splitter3;
-
-    dtbEventDecoder decoder0;
-    dtbEventDecoder decoder1;
-    dtbEventDecoder decoder2;
-    dtbEventDecoder decoder3;
-
+    std::vector<dtbSource> m_src;
+    std::vector<dtbEventSplitter> m_splitter;
+    std::vector<dtbEventDecoder> m_decoder;
   };
 }
 #endif

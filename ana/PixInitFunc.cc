@@ -77,6 +77,9 @@ void PixInitFunc::limitPar(int ipar, double lo, double hi) {
 }
 
 
+
+
+
 // ----------------------------------------------------------------------
 TF1* PixInitFunc::gpTanPol(TH1 *h) {
 
@@ -160,8 +163,8 @@ TF1* PixInitFunc::gpTanH(TH1 *h) {
   f->SetParameter(1, 0.8);
   f->SetParLimits(1, 0., 20.);
 
-  double middle = h->GetMaximum() - h->GetMinimum();
-  double step = h->GetMaximum() - middle; 
+  double middle = (h?h->GetMaximum() - h->GetMinimum() : 120.); 
+  double step = (h?h->GetMaximum() - middle : 100.); 
 
   f->SetParameter(2, middle);
   f->SetParLimits(2, 0., 2*middle);
@@ -210,6 +213,37 @@ TF1* PixInitFunc::weibullCdf(TH1 *h) {
 
 
 // ----------------------------------------------------------------------
+TF1* PixInitFunc::gpErr(TH1 *h) {
+
+  fDoNotFit = false;
+
+  // -- setup function
+  TF1* f = (TF1*)gROOT->FindObject("PIF_gpErr");
+  if (0 == f) {
+    f = new TF1("PIF_gpErr", PIF_err, h->GetBinLowEdge(1), h->GetBinLowEdge(h->GetNbinsX()+1), 4);
+    f->SetParNames("step", "slope", "floor", "plateau");                       
+    f->SetNpx(1000);
+  } else {
+    f->ReleaseParameter(0);     
+    f->ReleaseParameter(1);     
+    f->ReleaseParameter(2);     
+    f->ReleaseParameter(3); 
+  }
+  
+  double hmax = h->GetBinContent(h->GetMaximumBin()); 
+  double p0 = h->GetBinLowEdge(h->FindFirstBinAbove(0.5*hmax)); // half-point
+  double p1 = 250.; // slope
+  double p2 = 1.;
+  double p3 = 0.5*hmax; // half plateau
+
+  f->SetParameters(p0, p1, p2, p3); 
+  f->SetParLimits(1, 50, 1000.); // keep!
+
+  return f; 
+}
+
+
+// ----------------------------------------------------------------------
 TF1* PixInitFunc::errScurve(TH1 *h) {
 
   fDoNotFit = false;
@@ -220,7 +254,7 @@ TF1* PixInitFunc::errScurve(TH1 *h) {
   double hmax(h->GetMaximum()); 
   for (int i = STARTBIN; i <= h->GetNbinsX(); ++i) {
     if (h->GetBinContent(i) > 0) {
-      ibin = i; 
+      ibin = i; // first bin above zero
       break;
     }
   }
@@ -228,22 +262,28 @@ TF1* PixInitFunc::errScurve(TH1 *h) {
   // require 2 consecutive bins on plateau
   for (int i = STARTBIN; i < h->GetNbinsX(); ++i) {
     if (h->GetBinContent(i) > 0.9*hmax && h->GetBinContent(i+1) > 0.9*hmax) {
-      jbin = i; 
+      jbin = i; // first bin "really" on plateau
       break;
     }
   }
+
+  int plateauWidth = h->FindLastBinAbove(0.9*hmax) - jbin;
+  double hi = h->GetBinLowEdge(jbin + 0.7*plateauWidth);
 
   double lo = h->GetBinLowEdge(1); 
   // require 3 consecutive bins at zero
+  int foundLo(-1);
   for (int i = 3; i < h->GetNbinsX(); ++i) {
+    if (h->GetBinLowEdge(i-2) > hi) break;
     if (h->GetBinContent(i-2) < 1 && h->GetBinContent(i-1) < 1 && h->GetBinContent(i) < 1) {
       lo = h->GetBinLowEdge(i-2);
+      foundLo = i-2;
       break;
     }
   }
-
-  double hi = h->FindLastBinAbove(0.9*h->GetMaximum());
-
+  if (foundLo > -1) {
+    lo = lo + 0.6*(h->GetBinLowEdge(ibin) - lo);
+  }
 
   // -- setup function
   TF1* f = (TF1*)gROOT->FindObject("PIF_err");
@@ -260,14 +300,28 @@ TF1* PixInitFunc::errScurve(TH1 *h) {
     f->SetRange(lo, hi); 
   }
   
-  f->SetParameter(0, h->GetBinCenter((ibin+jbin)/2)); 
-  f->SetParameter(1, 0.2); 
+  f->SetParameter(0, h->GetBinCenter(0.5*(ibin+jbin))); 
+  //before Jamie's issue:   f->SetParameter(1, 2.0/(h->GetBinLowEdge(jbin) - h->GetBinLowEdge(ibin))); 
+  f->SetParameter(1, 0.25*(h->GetBinLowEdge(jbin) - h->GetBinLowEdge(ibin))); 
+  if (0) cout << "init parameters 0: " << f->GetParameter(0) << " 1: " << f->GetParameter(1) 
+	      << " ibin: " << ibin << " jbin: " << jbin
+	      << " lo: " << lo << " hi: " << hi 
+	      << " foundLo: " << foundLo
+	      << " plateauWidth: "  << plateauWidth
+	      << endl;
+  // -- step function found; fix threshold
   if (jbin == ibin) {
-    //    cout << "XXXXXXXXXXX PixInitFunc: STEP FUNCTION " << h->GetTitle() << " ibin = " << ibin << " jbin = " << jbin << endl;
-    f->FixParameter(0, h->GetBinCenter(jbin)); 
-    f->FixParameter(1, 1.e2); 
+    f->FixParameter(0, h->GetBinCenter(jbin));
+    f->FixParameter(1, 1.e2);
     fDoNotFit = true;
   }
+  // -- if no plateau found, reset step to unphysical range (outside of histogram)
+  if (jbin < 0) {
+    f->FixParameter(0, h->GetBinLowEdge(1) - h->GetBinWidth(1));
+    f->FixParameter(1, 1.e2);
+    fDoNotFit = true;
+  }
+
   f->FixParameter(2, 1.); 
   f->FixParameter(3, 0.5*h->GetMaximum()); 
   return f; 

@@ -1,0 +1,1065 @@
+#! /usr/bin/perl
+
+# ----------------------------------------------------------------------
+# Usage     ../main/mkConfig -d directory [-f] [-t TBM08C] [-r digv21] [-m] [-b] [-h] [-p 's/hubId 31/hubId 0/g%s/nRocs 16/nRocs 12/g']
+# -----
+#
+# Options   -d directory              the directory into which all config files will be put
+# -------   -t TBM08                  the TBM type; mkConfig -h will list all known types
+#           -r digv21                 the ROC type; mkConfig -h will list all known types
+#           -f                        for FPIX type HDI (with temperature sensor)
+#           -m                        whether a module config directory should be set up (impacts nrocs, TBM setup, number of parameter files, etc)
+#           -b                        whether a bare module config directory should be set up (still single ROC folder; impacts hvOn, testParameters)
+#           -h                        list all known ROC and TBM types and print help message
+#           -p 's/hubId 31/hubId 0/'  pattern changes: will apply the regexp to change any matches among all files; separate multiple patterns with %
+#           -s                        short: only produce testParameters.dat
+# ----------------------------------------------------------------------
+
+use Getopt::Std;
+getopts('bd:fhmp:r:t:s');
+
+# -- define known hardware types
+my @rocok = ("digv2", "digv21", "digv21respin", "proc600");
+my @tbmok = ("TBM08", "TBM08A", "TBM08B", "TBM08C", "TBM09", "TBM09C", "TBM10C");
+
+if ($opt_h) {
+    &printHelp;
+    exit(0);
+}
+
+# -- create directory or if existing, remove all config files from the old one
+my $dir = "roc";
+if ($opt_d) {
+    $dir = $opt_d;
+}
+if (!-d "$dir") {
+    mkdir($dir);
+} else {
+    &cleanFiles;
+}
+
+# -- recreate testParameters.dat file
+if ($opt_s) {
+    &printTestParameters;
+    exit(0);
+}
+
+
+# -- do not turn on HV when running a baremodule test
+my $hvon = 1;
+if ($opt_b) {
+    $hvon = 0;
+}
+
+
+# -- ROC type from either command line or by default
+my $dacs = "";
+my $roctype = "digv21respin";
+if ($opt_r) {
+    $opt_r =~ tr/A-Z/a-z/;
+    if (grep(/$opt_r/, @rocok)) {
+	$roctype = $opt_r;
+    } else {
+	print "roc type $opt_r not known, resetting to $roctype (known ROC types: ", join(", " , @rocok), ")\n";
+    }
+}
+&setDacs;
+
+my $rbCals = "";
+&setRbCals;
+
+# -- TBM type from either command line or by default
+my $tbms = "";
+my $tbmtype = "TBM08C";
+if ($opt_t) {
+    $opt_t =~ tr/a-z/A-Z/;
+    if (grep(/$opt_t/, @tbmok)) {
+	$tbmtype = $opt_t;
+    } else {
+	print "TBM type $opt_t not known, resetting to $tbmtype (known TBM types: ", join(", " , @tbmok), ")\n";
+    }
+}
+
+
+# -- number of rocs and tbms
+my $nrocs = 1;
+my $ntbms = 0;
+if ($opt_m) {
+    $nrocs = 16;
+    $ntbms = 1;
+    if ($tbmtype eq "TBM10C") {
+        $ntbms = 2;
+    }
+}
+
+
+# -- create all config files
+print "dumping ";
+if ($opt_m) {
+    print "module";
+} else {
+    print "roc";
+}
+print " config files into directory $dir for ROC type $roctype";
+if ($opt_m) {
+    print " and TBM type $tbmtype";
+}
+
+if ($opt_f) {
+    print " and FPIX-type HDI\n";
+} else {
+    print "\n";
+}
+
+&printConfigParameters;
+&printTestParameters;
+&printTrimParameters;
+&printDacParameters;
+&printTbParameters;
+&printMaskFile;
+&printTestPatterns;
+&printRbCal;
+if ($opt_m) {
+    &setTbms;
+    &printTbmParameters;
+}
+
+# -- apply all (string) substitutions
+if ($opt_p) {
+    if ($opt_p) {$patterns = $opt_p; }
+    @patterns = split(/%/, $patterns);
+    print "patterns: $patterns\n";
+
+    my @files = glob("$dir/*");
+
+    foreach $repl (@patterns) {
+	($pref, $orig, $change, $postf) = split(/\//, $repl);
+	foreach $file (@files) {
+	    open(IN, "$file") || die "Cannot open $file\n";
+	    @lines = <IN>;
+	    close(IN);
+	    if (grep /$orig/, @lines) {
+		print "$file: changing $orig -> $change\n" ;
+		grep(s/$orig/$change/g, @lines);
+		open(OUT, ">$file") || die "Cannot open $file for output\n";
+		print OUT @lines;
+		close(OUT);
+	    }
+	}
+
+    }
+}
+
+# -- that's it
+exit(0);
+
+
+# ----------------------------------------------------------------------
+sub setTbms {
+    $tbms = "";
+    $oldStyle = 0;
+    if ($tbmtype eq "TBM08C") {
+	if ($oldStyle == 1) {
+	    $tbms .= "0       clear   0xF0\n";
+	    $tbms .= "1    counters   0x81\n";
+	    $tbms .= "2        mode   0xC0\n";
+	    $tbms .= "3    pkam_set   0x10\n";
+#	    $tbms .= "4      delays   0x64\n";
+#	    $tbms .= "5       basee   0x2c\n";
+	    if ($opt_f) {
+		$tbms .= "4      delays   0xD2\n";
+		$tbms .= "5       basee   0xC8\n";
+	    } else {
+		# -- WE's parameters
+		$tbms .= "4      delays   0x49\n";
+		$tbms .= "5       basee   0x84\n";
+	    }
+	    $tbms .= "6 temperature   0x00\n";
+	} else {
+	    $tbms .= "base0   0x81\n";
+	    $tbms .= "base2   0xC0\n";
+	    $tbms .= "base4   0xF0\n";
+	    $tbms .= "base8   0x10\n";
+#	    $tbms .= "basea   0x64\n";
+#	    $tbms .= "basee   0x2c\n";
+	    $tbms .= "basec   0x00\n";
+	    if ($opt_f) {
+		$tbms .= "basea   0xD2\n";
+		$tbms .= "basee   0xC8\n";
+	    } else {
+		$tbms .= "basea   0x49\n";
+		$tbms .= "basee   0x84\n";
+	    }
+	}
+    } elsif ($tbmtype eq "TBM08A") {
+	if ($oldStyle == 1) {
+	    $tbms .= "0       clear   0xF0\n";
+	    $tbms .= "1    counters   0x81\n";
+	    $tbms .= "2        mode   0xC0\n";
+	    $tbms .= "3    pkam_set   0x10\n";
+#	    $tbms .= "4      delays   0x64\n";
+#	    $tbms .= "5       basee   0x2c\n";
+	    # -- WE's parameters
+	    $tbms .= "4      delays   0x49\n";
+	    $tbms .= "5       basee   0x84\n";
+	    $tbms .= "6 temperature   0x00\n";
+	} else {
+	    $tbms .= "base0   0x81\n";
+	    $tbms .= "base2   0xC0\n";
+	    $tbms .= "base4   0xF0\n";
+	    $tbms .= "base8   0x10\n";
+#	    $tbms .= "basea   0x64\n";
+#	    $tbms .= "basee   0x2c\n";
+	    $tbms .= "basea   0x49\n";
+	    $tbms .= "basec   0x00\n";
+	    $tbms .= "basee   0x84\n";
+	}
+    } elsif ($tbmtype eq "TBM08B") {
+	if ($oldStyle == 1) {
+	    $tbms .= "0       clear   0xF0\n";
+	    $tbms .= "1    counters   0x81\n";
+	    $tbms .= "2        mode   0xC0\n";
+	    $tbms .= "3    pkam_set   0x10\n";
+#           $tbms .= "4      delays   0x64\n";
+#           $tbms .= "5       basee   0x2c\n";
+	    # -- WE's parameters
+	    $tbms .= "4      delays   0x49\n";
+	    $tbms .= "5       basee   0x84\n";
+	    $tbms .= "6 temperature   0x00\n";
+	} else {
+	    $tbms .= "base0   0x81\n";
+	    $tbms .= "base2   0xC0\n";
+	    $tbms .= "base4   0xF0\n";
+	    $tbms .= "base8   0x10\n";
+#           $tbms .= "basea   0x64\n";
+#           $tbms .= "basee   0x2c\n";
+	    $tbms .= "basea   0x49\n";
+	    $tbms .= "basec   0x00\n";
+	    $tbms .= "basee   0x84\n";
+	}
+    } elsif ($tbmtype eq "TBM08") {
+	if ($oldStyle == 1) {
+	    $tbms .= "0       clear   0xF0\n";
+	    $tbms .= "1    counters   0x01\n";
+	    $tbms .= "2        mode   0xC0\n";
+	    $tbms .= "3    pkam_set   0x10\n";
+	    $tbms .= "4      delays   0x00\n";
+	    $tbms .= "5 temperature   0x00\n";
+	} else {
+	    $tbms .= "base0   0x01\n";
+	    $tbms .= "base2   0xC0\n";
+	    $tbms .= "base4   0xF0\n";
+	    $tbms .= "base8   0x10\n";
+	    $tbms .= "basea   0x00\n";
+	    $tbms .= "basec   0x00\n";
+	}
+    } elsif ($tbmtype eq "TBM09") {
+	if ($oldStyle == 1) {
+	    $tbms .= "0       clear   0xF0\n";
+	    $tbms .= "1    counters   0x81\n";
+	    $tbms .= "2        mode   0xC0\n";
+	    $tbms .= "3    pkam_set   0x10\n";
+	    $tbms .= "4      delays   0x64\n";
+	    $tbms .= "5       basee   0x34\n";
+	    $tbms .= "6 temperature   0x00\n";
+	} else {
+	    $tbms .= "base0   0x81\n";
+	    $tbms .= "base2   0xC0\n";
+	    $tbms .= "base4   0xF0\n";
+	    $tbms .= "base8   0x10\n";
+	    $tbms .= "basea   0x64\n";
+	    $tbms .= "basec   0x00\n";
+	    $tbms .= "basee   0x34\n";
+	}
+    } elsif ($tbmtype eq "TBM09C") {
+	if ($oldStyle == 1) {
+	    $tbms .= "0       clear   0xF0\n";
+	    $tbms .= "1    counters   0x81\n";
+	    $tbms .= "2        mode   0xC0\n";
+	    $tbms .= "3    pkam_set   0x10\n";
+	    $tbms .= "4      delays   0x64\n";
+	    $tbms .= "5       basee   0x34\n";
+	    $tbms .= "6 temperature   0x00\n";
+	} else {
+	    $tbms .= "base0   0x81\n";
+	    $tbms .= "base2   0xC0\n";
+	    $tbms .= "base4   0xF0\n";
+	    $tbms .= "base8   0x10\n";
+	    $tbms .= "basea   0x64\n";
+	    $tbms .= "basec   0x00\n";
+	    $tbms .= "basee   0x34\n";
+	}
+    } elsif ($tbmtype eq "TBM10C") {
+	if ($oldStyle == 1) {
+	    $tbms .= "0       clear   0xF0\n";
+	    $tbms .= "1    counters   0x81\n";
+	    $tbms .= "2        mode   0xC0\n";
+	    $tbms .= "3    pkam_set   0x10\n";
+	    $tbms .= "4      delays   0xe4\n";
+	    $tbms .= "5       basee   0x08\n";
+	    $tbms .= "6 temperature   0x00\n";
+	    $tbms .= "7      nrocs1   0x02\n";
+	    $tbms .= "8      nrocs2   0x02\n";
+	} else {
+	    $tbms .= "base0   0x81\n";
+	    $tbms .= "base2   0xC0\n";
+	    $tbms .= "base4   0xF0\n";
+	    $tbms .= "base8   0x10\n";
+	    $tbms .= "basea   0xe4\n";
+	    $tbms .= "basec   0x00\n";
+	    $tbms .= "basee   0x08\n";
+	    $tbms .= "nrocs1  0x02\n";
+	    $tbms .= "nrocs2  0x02\n";
+	}
+    }
+}
+
+# ----------------------------------------------------------------------
+sub setDacs {
+    $dacs = "";
+    if ($roctype eq "proc600") {
+	$dacs .= "  1 vdig       6  \n";
+	$dacs .= "  2 vana       74 \n";
+	$dacs .= "  3 vsh        30 \n";
+	$dacs .= "  4 vcomp      12 \n";
+	$dacs .= "  7 vwllpr     150\n";
+	$dacs .= "  9 vwllsh     150\n";
+	$dacs .= " 10 vhlddel    250\n";
+	$dacs .= " 11 vtrim      0  \n";
+	$dacs .= " 12 vthrcomp   85 \n";
+	$dacs .= " 13 vcolorbias 30 \n";
+	$dacs .= " 17 phoffset   185\n";
+	$dacs .= " 19 vcomp_adc  50 \n";
+	$dacs .= " 20 phscale    65\n";
+	$dacs .= " 22 vicolor    100\n";
+	$dacs .= " 25 vcal       200\n";
+	$dacs .= " 26 caldel     133 \n";
+	$dacs .= "253 ctrlreg    0  \n";
+	$dacs .= "254 wbc        100\n";
+	$dacs .= "255 readback   0  \n";
+    } elsif ($roctype eq "digv21respin") {
+	$dacs .= "  1 vdig       6  \n";
+	$dacs .= "  2 vana       81 \n";
+	$dacs .= "  3 vsh        30 \n";
+	$dacs .= "  4 vcomp      12 \n";
+	$dacs .= "  7 vwllpr     150\n";
+	$dacs .= "  9 vwllsh     150\n";
+	$dacs .= " 10 vhlddel    250\n";
+	$dacs .= " 11 vtrim      0  \n";
+	$dacs .= " 12 vthrcomp   85 \n";
+	$dacs .= " 13 vibias_bus 30 \n";
+	$dacs .= " 17 phoffset   185\n";
+	$dacs .= " 19 vcomp_adc  50 \n";
+	$dacs .= " 20 phscale    65\n";
+	$dacs .= " 22 vicolor    100\n";
+	$dacs .= " 25 vcal       200\n";
+	$dacs .= " 26 caldel     133 \n";
+	$dacs .= "253 ctrlreg    0  \n";
+	$dacs .= "254 wbc        100\n";
+	$dacs .= "255 readback   0  \n";
+    } elsif ($roctype eq "digv21") {
+	$dacs .= "  1 vdig       6  \n";
+	$dacs .= "  2 vana       78 \n";
+	$dacs .= "  3 vsh        30 \n";
+	$dacs .= "  4 vcomp      12 \n";
+	$dacs .= "  7 vwllpr     150\n";
+	$dacs .= "  9 vwllsh     150\n";
+	$dacs .= " 10 vhlddel    250\n";
+	$dacs .= " 11 vtrim      0  \n";
+	$dacs .= " 12 vthrcomp   85 \n";
+	$dacs .= " 13 vibias_bus 30 \n";
+	$dacs .= " 17 phoffset   170\n";
+	$dacs .= " 19 vcomp_adc  50 \n";
+	$dacs .= " 20 phscale    130\n";
+	$dacs .= " 22 vicolor    100\n";
+	$dacs .= " 25 vcal       200\n";
+	$dacs .= " 26 caldel     96 \n";
+	$dacs .= "253 ctrlreg    0  \n";
+	$dacs .= "254 wbc        100\n";
+	$dacs .= "255 readback   0  \n";
+    } elsif ($roctype eq "digv2") {
+	$dacs .= "  1       vdig   6\n";
+	$dacs .= "  2       vana 110\n";
+	$dacs .= "  3        vsh 100\n";
+	$dacs .= "  4      vcomp  12\n";
+	$dacs .= "  7     vwllpr  60\n";
+	$dacs .= "  9     vwllsh  60\n";
+	$dacs .= " 10    vhlddel 250\n";
+	$dacs .= " 11      vtrim   0\n";
+	$dacs .= " 12   vthrcomp  50\n";
+	$dacs .= " 13 vibias_bus   1\n";
+	$dacs .= " 14   vbias_sf   6\n";
+	$dacs .= " 15  voffsetop  85\n";
+	$dacs .= " 17  phoffset  150\n";
+	$dacs .= " 18       vion 128\n";
+	$dacs .= " 19  vcomp_adc 100\n";
+	$dacs .= " 20  phscale    60\n";
+	$dacs .= " 22    vicolor  20\n";
+	$dacs .= " 25       vcal 200\n";
+	$dacs .= " 26     caldel 100\n";
+	$dacs .= "253    ctrlreg   0\n";
+	$dacs .= "254        wbc 100\n";
+    }
+
+}
+
+# ----------------------------------------------------------------------
+sub setRbCals {
+    $rbCals = "";
+	$rbCals .= "par0vd   1.\n";
+	$rbCals .= "par1vd   1.\n";
+	$rbCals .= "par0va   1.\n";
+	$rbCals .= "par1va   1.\n";
+	$rbCals .= "par0rbia 1.\n";
+	$rbCals .= "par1rbia 1.\n";
+	$rbCals .= "par0tbia 1.\n";
+	$rbCals .= "par1tbia 1.\n";
+	$rbCals .= "par2tbia 1.\n";
+}
+
+
+
+# ----------------------------------------------------------------------
+sub cleanFiles {
+
+    # -- clean only testParameters.dat if -s is amongst the cmd line options
+    if ($opt_s) {
+	$file = "$dir/testParameters.dat";
+	if (-e "$file") {
+	    unlink($file);
+	}
+	return;
+    }
+
+    my $file;
+    for ($i = 0; $i < 16; $i++) {
+	$file = "$dir/trimParameters_C$i.dat";
+	if (-e "$file") {
+	    unlink($file);
+	}
+	$file = "$dir/dacParameters_C$i.dat";
+	if (-e "$file") {
+	    unlink($file);
+	}
+	$file = "$dir/readbackCal_C$i.dat";
+	if (-e "$file") {
+	    unlink($file);
+	}
+    }
+
+    $file = "$dir/tbParameters.dat";
+    if (-e "$file") {
+	unlink($file);
+    }
+
+    for ($i = 0; $i < 2; $i++) {
+	$file = "$dir/tbmParameters_C${i}a.dat";
+	if (-e "$file") {
+	    unlink($file);
+	}
+	$file = "$dir/tbmParameters_C${i}b.dat";
+	if (-e "$file") {
+	    unlink($file);
+	}
+    }
+
+    $file = "$dir/configParameters.dat";
+    if (-e "$file") {
+	unlink($file);
+    }
+
+    $file = "$dir/defaultMaskFile.dat";
+    if (-e "$file") {
+	unlink($file);
+    }
+
+    $file = "$dir/testPatterns.dat";
+    if (-e "$file") {
+	unlink($file);
+    }
+
+    $file = "$dir/testParameters.dat";
+    if (-e "$file") {
+	unlink($file);
+    }
+
+}
+
+# ----------------------------------------------------------------------
+sub printConfigParameters {
+    my $file = "$dir/configParameters.dat";
+    my $VD = "2.600";
+    open(FH, ">$file") || die "cannot open $file\n";
+    print FH <<"EOF";
+testboardName *
+
+-- parameter files
+
+tbParameters tbParameters.dat
+dacParameters dacParameters
+tbmParameters tbmParameters
+trimParameters trimParameters
+testParameters testParameters.dat
+maskFile defaultMaskFile.dat
+rootFileName pxar.root
+#gainPedestalParameters phCalibrationFitTanH
+#gainPedestalParameters phCalibrationFitPol2
+gainPedestalParameters phCalibrationFitErr
+
+-- configuration
+
+nModules 1
+#nRocs $nrocs i2c: 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+nRocs $nrocs
+nTbms $ntbms
+EOF
+    if ($opt_m) {
+        if ($tbmtype eq "TBM10C") {
+        print FH "hubId 31, 30\n";
+        } else {
+        print FH "hubId 31\n";
+	    }
+    print FH "tbmEnable 1\n";
+    } else {
+	print FH "hubId 0\n";
+	print FH "tbmEnable 0\n";
+    }
+
+    print FH <<"EOF";
+tbmEmulator 0
+hvOn $hvon
+tbmChannel 0
+EOF
+
+if ($roctype eq "digv21") {
+    print FH "rocType psi46digv2.1\n";
+} elsif ($roctype eq "digv2") {
+    print FH "rocType psi46digv2\n";
+} elsif ($roctype eq "digv21respin") {
+    print FH "rocType psi46digv21respin\n";
+} elsif ($roctype eq "proc600") {
+    print FH "rocType proc600\n";
+}
+
+
+
+if ($opt_m) {
+    if ($tbmtype eq "TBM08") {
+	print FH "tbmType tbm08\n";
+    } elsif ($tbmtype eq "TBM08C") {
+	$VD = "2.800";
+	print FH "tbmType tbm08c\n";
+    } elsif ($tbmtype eq "TBM08A") {
+	$VD = "2.800";
+	print FH "tbmType tbm08a\n";
+    } elsif ($tbmtype eq "TBM08B") {
+    $VD = "2.800";
+    print FH "tbmType tbm08b\n";
+    } elsif ($tbmtype eq "TBM09") {
+	$VD = "2.900";
+	print FH "tbmType tbm09\n";
+    } elsif ($tbmtype eq "TBM09C") {
+	$VD = "2.900";
+	print FH "tbmType tbm09c\n";
+    } elsif ($tbmtype eq "TBM10C") {
+    $VD = "2.900";
+    print FH "tbmType tbm10c\n";
+    }
+    else {
+	print FH "tbmType tbm08\n";
+    }
+    if ($opt_f) {
+	print FH "hdiType fpix\n";
+    } else {
+	print FH "hdiType bpix\n";
+    }
+}
+    print FH <<"EOF";
+
+guiX 0
+guiY 0
+
+probeA1 sdata1
+probeA2 sdata2
+probeD1 clk
+probeD2 ctr
+
+-- voltages and current limits
+
+ia 1.190
+id 1.100
+va 1.900
+vd $VD
+
+EOF
+
+    close(FH);
+
+}
+
+# ----------------------------------------------------------------------
+sub printTestParameters {
+    my $file = "$dir/testParameters.dat";
+    open(FH, ">$file") || die "cannot open $file\n";
+    print FH <<"EOF";
+-- Pretest
+programroc          button
+ignoreProblems      checkbox(0)
+targetIa            24
+setVana             button
+iterations          100
+setTimings          button
+findTiming          button
+findWorkingPixel    button
+setVthrCompCalDel   button
+PIX                 11,20
+Vcal                250
+DeltaVthrComp       50
+fracCalDel          0.5
+Ntrig               5
+SaveDacs            button
+
+-- PixelAlive
+Ntrig               10
+Vcal                200
+MaskDeadPixels      checkbox(0)
+SaveMaskFile        checkbox(0)
+maskFileName        default
+aliveTest           button
+maskTest            button
+addressDecodingTest button
+
+-- DacScan
+PHmap               checkbox(1)
+AllPixels           checkbox(0)
+Unmasked            checkbox(0)
+Ntrig               10
+DAC                 vcal
+DACLO               0
+DACHI               255
+PIX                 11,20
+
+-- DacDacScan
+PHmap               checkbox
+Ntrig               10
+DAC1                caldel
+DAC1LO              0
+DAC1HI              255
+DAC2                vthrcomp
+DAC2LO              0
+DAC2HI              255
+PIX                 11,20
+
+-- Ph
+Ntrig               10
+DAC                 vcal
+DACval              200
+PIX                 11,20
+phMap               button
+
+-- BB
+dumpAll             checkbox(0)
+dumpProblematic     checkbox(0)
+Ntrig               5
+vcals               250
+
+-- BB2
+Ntrig               10
+vcals               222
+Plwidth             35
+PIX                 11,20
+targetIa            24
+
+-- BB3
+dumpAll             checkbox(0)
+dumpProblematic     checkbox(0)
+Ntrig               5
+vcals               250
+
+-- BB4
+savecaldelscan      checkbox(0)
+Ntrig               100
+Cals                1
+CalDelLo            80
+CalDelHi            200
+CalDelStep          10
+VthrCompLo          70
+VthrCompHi          130
+VthrCompStep        5
+NoisyPixels         10
+Vcal                255
+Cut                 0.5
+
+-- Readback
+calibrateVd         button
+calibrateVa         button
+calibrateIa         button
+readbackVbg         button
+getCalibratedVbg    button
+useCalVd            checkbox(1)
+useCalVa            checkbox(0)
+setVana             button
+
+-- IV
+port                /dev/FIXME
+voltageStart        0
+voltageStop         600
+voltageStep         5
+delay               1
+compliance(ua)      100
+
+EOF
+
+if ($opt_b) {
+    print FH <<"EOF";
+-- BareModule
+stepmax(1-3)        3
+bbmap               checkbox(1)
+bb2map(desy)        checkbox
+mincurrent(ma)      5
+checkcontact        button
+dofullsequence      button
+
+EOF
+
+} else {
+    print FH <<"EOF";
+-- Scurves
+adjustvcal          checkbox(0)
+dumpAll             checkbox(0)
+dumpProblematic     checkbox(0)
+dumpOutputFile      checkbox(0)
+Ntrig               50
+DAC                 Vcal
+DacLo               0
+DacHi               200
+Dacs/Step           -1
+Ntrig/Step          -1
+scurves             button
+
+-- Trim
+trim                button
+Ntrig               8
+Vcal                35
+TrimBits            button
+
+-- GainPedestal
+showFits            checkbox(0)
+extended            checkbox(0)
+dumpHists           checkbox(0)
+Ntrig               10
+vcalstep            10
+measure             button
+fit                 button
+save                button
+
+-- PhOptimization
+ntrig               10
+safetymarginlow     20
+saturationvcal      100
+quantilesaturation  0.98
+
+-- Xray
+maskHotPixels       button
+saveMaskFile        checkbox(0)
+maskFileName        default
+source              Ag
+phrun               button
+runseconds          100
+trgfrequency(khz)   100
+ratescan            button
+vthrcompmin         10
+vthrcompmax         80
+stepseconds         5
+DelayTBM            checkbox
+FillTree            checkbox
+
+-- HighRate
+PIX                 11,20
+trimhotpixels       button
+trimhotpixelthr     200
+runsecondsHotPixels 10
+savetrimbits        checkbox(1)
+maskuntrimmable     checkbox(1)
+maskHotPixels       button
+saveMaskFile        checkbox(0)
+maskFileName        default
+CalDelScan          button
+xPixelAlive         button
+Ntrig               50
+Vcal                200
+xNoiseMaps          button
+DacLo               0
+DacHi               100
+Dacs/Step           20
+runDaq              button
+trgfrequency(khz)   20
+runseconds          2
+triggerdelay        20
+DelayTBM            checkbox
+FillTree            checkbox
+
+-- Cmd
+
+EOF
+}
+
+if (!$opt_m) {
+    print FH <<"EOF";
+-- Setup
+DeserMax            7
+ClkMax              19
+saveTbParameters    button
+
+EOF
+} else {
+    print FH <<"EOF";
+-- Timing
+targetclk           4
+ntrig               10000
+notokenpass         checkbox(0)
+ignorereadback      checkbox(0)
+clocksdascan        button
+phasescan           button
+levelscan           button
+tbmphasescan        button
+rocdelayscan        button
+timingtest          button
+saveparameters      button
+EOF
+}
+
+
+close(FH);
+
+
+
+    my $file2 = "$dir/moreTestParameters.dat";
+    open(FH, ">$file2") || die "cannot open $file2\n";
+    print FH <<"EOF";
+-- Pattern
+externalclk         checkbox(0)
+triggerloop         checkbox(0)
+seconds             5
+period              1000
+pgcycles            100
+patternfromfile     checkbox(0)
+unmaskall           checkbox(0)
+inputfile           testPatterns
+filltree            checkbox(0)
+resultsonfile       checkbox(0)
+binaryoutput        checkbox(0)
+outputfile          defaultPattern
+resettodefault      button
+
+-- BareModule
+stepmax(1-3)        3
+bbmap               checkbox(1)
+bb2map(desy)        checkbox
+checkcontact        button
+pretest             button
+alive               button
+bumpbonding         button
+dofullsequence      button
+
+-- DAQ
+delayTBM            checkbox
+filltree            checkbox
+trgfrequency(khz)   100
+maskHotPixels       button
+trgnumber           5
+iterations          10
+rundaqtrg           button
+daqseconds          5
+rundaqseconds       button
+
+-- DoubleColumn
+min                 0
+max                 40
+npix                4
+delay               65
+data                button
+
+
+EOF
+
+close(FH);
+
+
+}
+
+# ----------------------------------------------------------------------
+sub printTbParameters {
+    my $file = "$dir/tbParameters.dat";
+    open(FH, ">$file") || die "cannot open $file\n";
+    print FH <<"EOF";
+  0             clk    4
+  1             ctr    4
+  2             sda   19
+  3             tin    9
+  4           level   15
+EOF
+
+    if (!$opt_m) {
+	print FH "254   deser160phase    4\n";
+    } else {
+	print FH "253    triggerdelay    0\n";
+    }
+    close(FH);
+
+}
+
+# ----------------------------------------------------------------------
+sub printTrimParameters {
+    for ($iroc = 0; $iroc < $nrocs; $iroc++) {
+	my $file = "$dir/trimParameters_C$iroc.dat";
+	open(FH, ">$file") || die "cannot open $file\n";
+	for ($ix = 0; $ix < 52; $ix++) {
+	    for ($iy = 0; $iy < 80; $iy++) {
+		print FH sprintf("15   Pix %2d %2d\n", $ix, $iy);
+	    }
+	}
+	close(FH);
+    }
+
+
+}
+
+
+# ----------------------------------------------------------------------
+sub printDacParameters {
+    for ($iroc = 0; $iroc < $nrocs; $iroc++) {
+	my $file = "$dir/dacParameters_C$iroc.dat";
+	open(FH, ">$file") || die "cannot open $file\n";
+	print FH $dacs;
+	close(FH);
+    }
+
+
+}
+
+# ----------------------------------------------------------------------
+sub printRbCal {
+    for ($iroc = 0; $iroc < $nrocs; $iroc++) {
+	my $file = "$dir/readbackCal_C$iroc.dat";
+	open(FH, ">$file") || die "cannot open $file\n";
+	print FH $rbCals;
+	close(FH);
+    }
+
+
+}
+
+# ----------------------------------------------------------------------
+sub printTbmParameters {
+    $tbmsa = $tbms;
+    for ($itbm = 0; $itbm < $ntbms; $itbm++) {
+	my $file = "$dir/tbmParameters_C${itbm}a.dat";
+	open(FH, ">$file") || die "cannot open $file\n";
+	print FH $tbmsa;
+	close(FH);
+
+	my $file = "$dir/tbmParameters_C${itbm}b.dat";
+	open(FH, ">$file") || die "cannot open $file\n";
+	$tbms =~ s/basee[ ]?.*/basee   0x00/;
+	print FH $tbms;
+	close(FH);
+    }
+
+}
+
+
+
+# ----------------------------------------------------------------------
+sub printTestPatterns {
+    my $file = "$dir/testPatterns.dat";
+    open(FH, ">$file") || die "cannot open $file\n";
+    print FH <<"EOF";
+
+-- Pattern
+
+delay , 255
+delay , 219
+cal   , 106
+
+trg   , 20
+tok   , 219
+delay , 255
+cal   , 106
+
+trg   , 20
+tok   , 219
+delay , 255
+cal   , 106
+
+trg   , 20
+tok   , 219
+delay , 255
+cal   , 106
+
+trg   , 20
+tok   , 70
+delay , 255
+delay , 255
+
+trg   , 20
+tok   , 0
+
+
+-- Test Pixels (col,row)
+pix  15 , 40
+pix  25 , 40
+pix  51 , 40
+
+-- Unmask Pixels (col,row)
+pix  8 , 46
+pix  10 , 21
+pix  11 , 36
+
+EOF
+
+close(FH);
+}
+
+
+# ----------------------------------------------------------------------
+sub printMaskFile {
+    my $file = "$dir/defaultMaskFile.dat";
+    open(FH, ">$file") || die "cannot open $file\n";
+    print FH <<"EOF";
+# how to Mask
+# pix 0 42 51
+# col 0 21
+# row 0 4
+# roc 0
+#
+EOF
+
+    close(FH);
+}
+
+
+# ----------------------------------------------------------------------
+sub printHelp {
+    $" = " ";
+    print "ROC types known: ",  join(", " , @rocok), "\n";
+    print "TBM types known: ",  join(", " , @tbmok), "\n";
+    print <<"EOF";
+
+Usage     ../main/mkConfig -d directory [-t TBM08] [-r digv21] [-b] [-m] [-h] [-p 's/hubId 31/hubId 0/g%s/nRocs 16/nRocs 12/g']
+-----
+
+Options   -d directory              the directory into which all config files will be put
+-------   -t TBM08                  the TBM type; mkConfig -h will list all known types
+          -r digv21                 the ROC type; mkConfig -h will list all known types
+          -f                        for FPIX type HDI (with temperature sensor)
+          -m                        whether a module config directory should be set up (impacts nrocs, TBM setup, number of parameter files, etc)
+          -b                        whether a bare module config directory should be set up (still single ROC folder; impacts hvOn, testParameters)
+          -h                        list all known ROC and TBM types and print help message
+          -p 's/hubId 31/hubId 0/'  pattern changes: will apply the regexp to change any matches among all files; separate multiple patterns with %
+
+The default choices are: digv21respin and TBM08
+EOF
+
+    print "for all other questions, read the source code ... \n";
+}

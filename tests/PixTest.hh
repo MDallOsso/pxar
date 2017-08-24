@@ -32,20 +32,23 @@ typedef char int8_t;
 #include "PixInitFunc.hh"
 #include "PixSetup.hh"
 #include "PixTestParameters.hh"
+#include "shist256.hh"
 
 typedef struct { 
   uint16_t dac;
   uint16_t header; 
   uint16_t trailer; 
   uint16_t numDecoderErrors;
-  uint8_t npix;
-  uint8_t proc[2000];
-  uint8_t pcol[2000];
-  uint8_t prow[2000];
-  uint8_t pval[2000];
-  uint16_t pq[2000];
+  uint16_t npix;
+  uint8_t  proc[20000];
+  uint8_t  pcol[20000];
+  uint8_t  prow[20000];
+  double   pval[20000];
+  double   pq[20000];
 } TreeEvent;
 
+
+bool sortRocHist(const TH1*, const TH1*); 
 
 ///
 /// PixTest
@@ -77,19 +80,26 @@ public:
   virtual void doAnalysis();
   /// function connected to "DoTest" button of PixTab
   virtual void doTest(); 
+  /// function called when FullTest is running; most often this is simply calling doTest()
+  virtual void fullTest(); 
   /// allow execution of any button in the test 
   virtual void runCommand(std::string command); 
-  /// create output suitable for moreweb
-  virtual void output4moreweb();
+  /// allow interrupt of test
+  virtual void stopTest() {fStopTest = true;}
   /// save DACs to file
   void saveDacs(); 
   /// save trim bits to file
   void saveTrimBits(); 
+  /// save TBM parameters to file
+  void saveTbmParameters(); 
   /// save TB parameters to file
   void saveTbParameters(); 
   /// create vector (per ROC) of vector of dead pixels
-  std::vector<std::vector<std::pair<int, int> > > deadPixels(int ntrig);
-  
+  std::vector<std::vector<std::pair<int, int> > > deadPixels(int ntrig, bool scanCalDel = false);
+  /// mask all pixels mentioned in the mask file
+  void maskPixels();     
+  /// query whether test 'failed'
+  bool testProblem() {return fProblem;}
 
   /// implement this to provide updated tool tips if the user changes test parameters
   virtual void setToolTips();
@@ -104,20 +114,33 @@ public:
 
   /// work-around to cope with suboptimal pxar/core
   int pixelThreshold(std::string dac, int ntrig, int dacmin, int dacmax);
+  /// scan a dac range. Will call preScan to protect against r/o problems. 
+  void dacScan(std::string dac, int ntrig, int dacmin, int dacmax, std::vector<shist256*> maps, int ihit, int flag = 0);
   /// kind of another work-around (splitting the range, adjusting ntrig, etc)
-  void dacScan(std::string dac, int ntrig, int dacmin, int dacmax, std::vector<std::vector<TH1*> > maps, int ihit, int flag = 0);
+  void preScan(std::string dac, std::vector<shist256*> maps, int &dacmin, int &dacmax);
   /// do the scurve analysis
-  void scurveAna(std::string dac, std::string name, std::vector<std::vector<TH1*> > maps, std::vector<TH1*> &resultMaps, int result);
+  void scurveAna(std::string dac, std::string name, std::vector<shist256*> maps, std::vector<TH1*> &resultMaps, int result);
   /// determine PH error interpolation
   void getPhError(std::string dac, int dacmin, int dacmax, int FLAGS, int ntrig);
+  /// returns TH2D's with pulseheight maps
+  std::vector<TH2D*> phMaps(std::string name, uint16_t ntrig = 10, uint16_t FLAGS = FLAG_FORCE_MASKED); 
   /// returns TH2D's with hit maps
   std::vector<TH2D*> efficiencyMaps(std::string name, uint16_t ntrig = 10, uint16_t FLAGS = FLAG_FORCE_MASKED); 
+
   /// returns (mostly) TH2D's with maps of thresholds (plus additional histograms if "result" is set so)
-  /// result controls the amount of information (histograms) returned
+  /// dacsperstep: if positive determines the maximum range of DACs to be looped over by pxarCore
   /// ihit controls whether a hitmap (ihit == 1) or PH map (ihit == 2) is returned
   /// flag allows to pass in other flags
+  /// result controls the amount of information (histograms) returned:
+  /// result & 0x1: thr        maps
+  /// result & 0x2: sig        maps
+  /// result & 0x4: noise edge maps
+  /// result & 0x8: also dump distributions for those maps enabled with 1,2, or 4
+  /// result &0x10: dump 'problematic' threshold histogram fits
+  /// result &0x20: dump all threshold histogram fits
   std::vector<TH1*> scurveMaps(std::string dac, std::string name, int ntrig = 10, int daclo = 0, int dachi = 255, 
-			       int result = 1, int ihit = 1, int flag = FLAG_FORCE_MASKED | FLAG_FORCE_SERIAL); 
+			       int dacsperstep = -1, int ntrigperstep = 1, 
+			       int result = 15, int ihit = 1, int flag = FLAG_FORCE_MASKED); 
   /// returns TH2D's for the threshold, the user flag argument is intended for selecting calS and will be OR'ed with other flags
   std::vector<TH1*> thrMaps(std::string dac, std::string name, uint8_t dacmin, uint8_t dachi, int ntrig, uint16_t flag = 0);
   std::vector<TH1*> thrMaps(std::string dac, std::string name, int ntrig, uint16_t flag = 0);
@@ -129,9 +152,32 @@ public:
   /// list.
   std::vector<std::pair<int,int> > checkHotPixels(TH2D* h);
 
-  /// Return pixelAlive map and additional hit map when running with external source
-  std::pair<std::vector<TH2D*>,std::vector<TH2D*> > xEfficiencyMaps(std::string name, uint16_t ntrig, 
-								    uint16_t FLAGS = FLAG_CHECK_ORDER | FLAG_FORCE_UNMASKED);
+  /// provide access to noiseMaps when (FLAG_CHECK_ORDER | FLAG_FORCE_UNMASKED) was set
+  std::vector<TH2D*> getXrayMaps() {return fXrayMaps;}
+
+  /// enable cal-injects for all pixels on DUT except those mentioned in the mask file
+  void dutCalibrateOn();
+
+  /// disable cal-injects for all pixels on DUT with subsequent call to maskPixels()
+  void dutCalibrateOff();
+  
+  /// determine hot pixels with high occupancy and increase their threshold with trim bit
+  void trimHotPixels(int hitThreshold = -1, int runSeconds = 10, bool maskuntrimmable = false);  
+  /// determine hot pixels with high occupancy
+  void maskHotPixels(std::vector<TH2D*>); 
+  /// send reset to ROC(s)
+  void resetROC();
+  /// send reset to TBM(s)
+  void resetTBM();
+  /// TBM register programming (from PixTestCmd)
+  int tbmSet(std::string name, uint8_t coreMask, int value, uint8_t valueMask=0xff);
+  /// set up DAQ (including call to setTriggerFrequency)
+  uint16_t prepareDaq(int triggerFreq, uint8_t trgTkDel);
+  /// set trigger frequence [kHz] and trigger token delay
+  uint16_t setTriggerFrequency(int triggerFreq, uint8_t TrgTkDel);
+  /// functions for DAQ
+  void finalCleanup();
+  void pgToDefault();
 
   /// book a TH1D, adding version information to the name and title 
   TH1D* bookTH1D(std::string sname, std::string title, int nbins, double xmin, double xmax); 
@@ -145,11 +191,8 @@ public:
   void fillDacHist(std::vector<std::pair<uint8_t, std::vector<pxar::pixel> > > &results, TH1D *h, 
 		   int icol = -1, int irow = -1, int iroc = -1); 
 
-  /// select some pattern of pixels if not enabling the complete ROC. Enables the complete ROC if npix > 999
-  virtual void sparseRoc(int npix = 8);
-
   /// creates a 1D distribution of a map
-  TH1D* distribution(TH2D *, int nbins, double xmin, double xmax, bool zeroSuppressed = false); 
+  TH1D* distribution(TH2D *, int nbins, double xmin, double xmax); 
   /// fit an s-curve to a distribution. Fills fThreshold, fThresholdE, fSigma, fSigmaE
   bool threshold(TH1 *); 
   /// find first bin above 50% level. Fills fThreshold, fThresholdE, fSigma, fSigmaE
@@ -165,6 +208,8 @@ public:
   /// return a list of TH* that have 'name' as part to their histogram name
   std::vector<TH1*> mapsWithString(std::vector<TH1*>, std::string name);
   std::vector<TH2D*> mapsWithString(std::vector<TH2D*>, std::string name);
+  /// return a list of TH2D* from fHistList
+  std::vector<TH2D*> mapsWithString(std::string name);
 
   /// produce eye-catching printouts
   void print(std::string, pxar::TLogLevel log = pxar::logINFO); 
@@ -176,10 +221,17 @@ public:
   /// restore all DACs
   void restoreDacs(bool verbose = false); 
 
+  /// cache all DACs
+  void cacheTBMDacs(bool verbose = false);
+  /// restore all DACs
+  void restoreTBMDacs(bool verbose = false);
+
   /// return from all ROCs the DAC dacName
   std::vector<uint8_t> getDacs(std::string dacName); 
   /// set on all ROCs the DAC dacName
   void setDacs(std::string dacName, std::vector<uint8_t> dacVector); 
+  /// return from all ROCs the DAC dacName as a string
+  std::string getDacsString(std::string dacName); 
 
   /// combine all available ROC maps into a module map
   virtual TH1* moduleMap(std::string histname); 
@@ -190,7 +242,7 @@ public:
   /// returns the test name
   std::string getName() {return fName; }
   /// ???
-  void resetDirectory();
+  virtual void resetDirectory();
   /// return fDirectory
   TDirectory* getDirectory() {return fDirectory;}
 
@@ -236,18 +288,38 @@ public:
   void testDone(); // *SIGNAL*
   /// signal to PixTab to update the canvas
   void update();  // *SIGNAL*
+  /// turn HV off
+  void hvOff();  // *SIGNAL*
+  /// turn HV on
+  void hvOn();  // *SIGNAL*
+  /// turn DTB power off
+  void powerOff();  // *SIGNAL*
+  /// turn DTB power on
+  void powerOn();  // *SIGNAL*
   /// allow forward iteration through list of histograms
   TH1* nextHist(); 
   /// allow backward iteration through list of histograms
-  TH1* previousHist(); 
-  
+  TH1* previousHist();
+  /// allow forward iteration through list of histograms
+  TH1* nextHistV(); 
+  /// allow backward iteration through list of histograms
+  TH1* previousHistV();  
+  /// split histogram writing from destructor to flush out histograms already filled for re-naming of root files
+  void writeOutput();
+
+  //Get NEvents and return the decoding statistics
+  pxar::statistics getEvents(int NEvents, int period, int buffer);
+  //Check the read back bits of the ROCs
+  bool checkReadBackBits(uint16_t period);
+  //Get the current TBM setting for the dut
+  uint8_t GetTBMSetting(std::string base, size_t tbmId);
 
 protected: 
 
   int histCycle(std::string hname);   ///< determine histogram cycle
   void fillMap(TH2D *hmod, TH2D *hroc, int iroc);  ///< provides the coordinate transformation to module map
 
-  pxar::pxarCore            *fApi;  ///< pointer to the API
+  pxar::pxarCore       *fApi;  ///< pointer to the API
   PixSetup             *fPixSetup;  ///< all necessary stuff in one place
   PixTestParameters    *fTestParameters;  ///< the repository of all test parameters
   PixInitFunc          *fPIF;    ///< function instantiation and automatic initialization
@@ -256,12 +328,15 @@ protected:
   double               fThresholdN; ///< variable for passing back the threshold where noise leads to loss of efficiency
   int                  fNtrig; 
   std::vector<double>  fPhErrP0, fPhErrP1; 
+  uint32_t             fNDaqErrors; 
 
   std::string           fName, fTestTip, fSummaryTip, fStopTip; ///< information for this test
+  std::string           fOutputFilename; 
 
   std::vector<std::pair<std::string, std::string> > fParameters; ///< the parameters of this test
 
   std::vector<std::vector<std::pair<std::string,uint8_t> > >  fDacCache; ///< vector for all ROCs 
+  std::vector<std::vector<std::pair<std::string,uint8_t> > >  fDacTBMCache; ///< vector for all TBMs
 
   TDirectory            *fDirectory; ///< where the root histograms will end up
   std::list<TH1*>       fHistList; ///< list of histograms available in PixTab::next and PixTab::previous
@@ -274,6 +349,16 @@ protected:
   TreeEvent             fTreeEvent;
   TTimeStamp           *fTimeStamp; 
 
+  bool                  fProblem, fStopTest;
+
+  std::vector<TH2D*>    fXrayMaps; 
+
+  int                   fTriStateColors[3]; 
+
+
+  // -- data members for DAQ purposes
+  std::vector<std::pair<std::string, uint8_t> > fPg_setup;
+  std::vector<std::vector<std::pair<int, int> > > fHotPixels;
 
   ClassDef(PixTest, 1); // testing PixTest
 

@@ -4,6 +4,11 @@
 #include <sstream>   // parsing
 #include <algorithm>  // std::find
 
+#include <TArrow.h>
+#include <TSpectrum.h>
+#include "TStopwatch.h"
+#include "TStyle.h"
+
 #include "PixTestBBMap.hh"
 #include "PixUtil.hh"
 #include "log.h"
@@ -15,7 +20,8 @@ using namespace pxar;
 ClassImp(PixTestBBMap)
 
 //------------------------------------------------------------------------------
-PixTestBBMap::PixTestBBMap(PixSetup *a, std::string name): PixTest(a, name), fParNtrig(-1), fParVcalS(200), fParXtalk(0) {
+PixTestBBMap::PixTestBBMap(PixSetup *a, std::string name): PixTest(a, name), 
+  fParNtrig(0), fParVcalS(200), fDumpAll(-1), fDumpProblematic(-1) {
   PixTest::init();
   init();
   LOG(logDEBUG) << "PixTestBBMap ctor(PixSetup &a, string, TGTab *)";
@@ -48,25 +54,40 @@ bool PixTestBBMap::setParameter(string parName, string sval) {
 	setToolTips();
 	return true;
       }
-      if (!parName.compare( "xtalk"))  { 
+
+      if (!parName.compare("dumpall")) {
 	PixUtil::replaceAll(sval, "checkbox(", ""); 
 	PixUtil::replaceAll(sval, ")", ""); 
-	fParXtalk = atoi(sval.c_str()); 
+	fDumpAll = atoi(sval.c_str()); 
 	setToolTips();
-	return true;
       }
+
+      if (!parName.compare("dumpallproblematic")) {
+	PixUtil::replaceAll(sval, "checkbox(", ""); 
+	PixUtil::replaceAll(sval, ")", ""); 
+	fDumpProblematic = atoi(sval.c_str()); 
+	setToolTips();
+      }
+
     }
   }
   return false;
 }
 
+// ----------------------------------------------------------------------
+void PixTestBBMap::resetDirectory() {
+  fDirectory = gFile->GetDirectory("BumpBonding"); 
+}
+
+
 //------------------------------------------------------------------------------
 void PixTestBBMap::init() {
   LOG(logDEBUG) << "PixTestBBMap::init()";
-  
-  fDirectory = gFile->GetDirectory( fName.c_str() );
-  if( !fDirectory ) {
-    fDirectory = gFile->mkdir( fName.c_str() );
+  // -- NOTE: The hard-coded name is really bad. This should be fName.
+  //    not going to change in production, as this affects moreweb. 
+  fDirectory = gFile->GetDirectory("BumpBonding");
+  if (!fDirectory) {
+    fDirectory = gFile->mkdir("BumpBonding");
   }
   fDirectory->cd();
 }
@@ -78,113 +99,200 @@ void PixTestBBMap::setToolTips() {
 }
 
 
+// // ----------------------------------------------------------------------
+// void PixTestBBMap::writeOutput() {
+//   std::list<TH1*>::iterator il; 
+//   string name("BumpBonding");
+//   cout << "name = " << name << " fDirectory = " << fDirectory << endl;
+//   fDirectory->cd(); 
+//   for (il = fHistList.begin(); il != fHistList.end(); ++il) {
+//     (*il)->SetDirectory(fDirectory); 
+//     (*il)->Write(); 
+//   }
+//   clearHistList();
+
+//   TH1D *h = (TH1D*)gDirectory->Get("ha"); 
+//   if (h) {
+//     h->SetDirectory(fDirectory); 
+//     h->Write();
+//   }
+
+//   h = (TH1D*)gDirectory->Get("hd"); 
+//   if (h) {
+//     h->SetDirectory(fDirectory); 
+//     h->Write();
+//   }
+
+// }
+
+
 //------------------------------------------------------------------------------
 PixTestBBMap::~PixTestBBMap() {
   LOG(logDEBUG) << "PixTestBBMap dtor";
-  if (fPixSetup->doMoreWebCloning()) output4moreweb();
 }
 
 //------------------------------------------------------------------------------
 void PixTestBBMap::doTest() {
 
+  TStopwatch t;
+
+  gStyle->SetPalette(1);
   cacheDacs();
   PixTest::update();
-  bigBanner(Form("PixTestBBMap::doTest() Ntrig = %d, VcalS = %d, xtalk = %d", fParNtrig, fParVcalS, fParXtalk));
+  bigBanner(Form("PixTestBBMap::doTest() Ntrig = %d, VcalS = %d (high range)", fParNtrig, fParVcalS));
  
   fDirectory->cd();
 
   fApi->_dut->testAllPixels(true);
   fApi->_dut->maskAllPixels(false);
+  maskPixels();
 
   int flag(FLAG_CALS);
   fApi->setDAC("ctrlreg", 4);     // high range
   fApi->setDAC("vcal", fParVcalS);    
 
-  int result(7);
+  int result(1);
+  if (fDumpAll) result |= 0x20;
+  if (fDumpProblematic) result |= 0x10;
 
-  LOG(logDEBUG) << "taking CalS threshold maps";
-  vector<TH1*>  thrmapsCals = scurveMaps("VthrComp", "calSMap", fParNtrig, 0, 170, result, 1, flag);
+  fNDaqErrors = 0; 
+  vector<TH1*>  thrmapsCals = scurveMaps("VthrComp", "calSMap", fParNtrig, 0, 149, -1, -1, result, 1, flag);
 
-  if (fParXtalk) {
-    LOG(logDEBUG) << "taking Xtalk maps";
-    vector<TH1*> thrmapsXtalk = scurveMaps("VthrComp", "calSMapXtalk", fParNtrig, 0, 170, result, 1, flag | FLAG_XTALK); 
-
-    LOG(logDEBUG) << "map analysis";
-    vector<uint8_t> rocIds = fApi->_dut->getEnabledRocIDs(); 
-    for (unsigned int idx = 0; idx < rocIds.size(); ++idx){
-      unsigned int rocId = getIdFromIdx(idx);
-      TH2D* rocmapRaw = (TH2D*)thrmapsCals[idx];
-      TH2D* rocmapBB(0); 
-      TH2D* rocmapXtalk(0);
-      
-      rocmapBB  = (TH2D*)rocmapRaw->Clone(Form("BB-%2d",rocId));
-      rocmapBB->SetTitle(Form("CalS - Xtalk %2d",rocId));
-      rocmapXtalk = (TH2D*)thrmapsXtalk[idx];  
-      rocmapBB->Add(rocmapXtalk, -1.);
-      fHistOptions.insert(make_pair(rocmapBB, "colz"));
-      fHistList.push_back(rocmapBB);
-      
-      TH1D* hdistBB = bookTH1D(Form("dist_CalS-Xtalksubtracted_C%d", rocId), 
-			       Form("CalS-Xtalksubtracted C%d", rocId), 
-			       514, -257., 257.);
-      
-      for (int col = 0; col < ROC_NUMCOLS; col++) {
-	for (int row = 0; row < ROC_NUMROWS; row++) {
-	  hdistBB->Fill(rocmapBB->GetBinContent(col+1, row+1));
-	}
-      }
-      fHistList.push_back(hdistBB);
-    }
-
-  }
-  
+  // -- relabel negative thresholds as 255 and create distribution list
+  vector<TH1D*> dlist; 
   TH1D *h(0);
-  
+  for (unsigned int i = 0; i < thrmapsCals.size(); ++i) {
+    for (int ix = 0; ix < thrmapsCals[i]->GetNbinsX(); ++ix) {
+      for (int iy = 0; iy < thrmapsCals[i]->GetNbinsY(); ++iy) {
+	if (thrmapsCals[i]->GetBinContent(ix+1, iy+1) < 0) thrmapsCals[i]->SetBinContent(ix+1, iy+1, 255.);
+      }
+    }
+    h = distribution((TH2D*)thrmapsCals[i], 256, 0., 256.);
+
+    dlist.push_back(h); 
+    fHistList.push_back(h); 
+  }
+
   restoreDacs();
 
   // -- summary printout
-  string bbString(""), hname(""); 
-  double bbprob(0.); 
-  for (unsigned int i = 0; i < thrmapsCals.size(); ++i) {
-    hname = thrmapsCals[i]->GetName();
-    if (string::npos == hname.find("dist_thr_")) continue;
-    h = (TH1D*)thrmapsCals[i];
-    bbprob = h->Integral(1, 10); 
-    bbString += Form(" %6.4f", bbprob); 
+  string bbString(""), bbCuts(""); 
+  int bbprob(0); 
+  int nPeaks(0), cutDead(0); 
+  TSpectrum s; 
+  for (unsigned int i = 0; i < dlist.size(); ++i) {
+    h = (TH1D*)dlist[i];
+    nPeaks = s.Search(h, 5, "", 0.01); 
+    LOG(logDEBUG) << "found " << nPeaks << " peaks in " << h->GetName();
+    cutDead = fitPeaks(h, s, nPeaks); 
+
+    bbprob = static_cast<int>(h->Integral(cutDead, h->FindBin(255)));
+    bbString += Form(" %4d", bbprob); 
+    bbCuts   += Form(" %4d", cutDead); 
+
+    TArrow *pa = new TArrow(cutDead, 0.5*h->GetMaximum(), cutDead, 0., 0.06, "|>"); 
+    pa->SetArrowSize(0.1);
+    pa->SetAngle(40);
+    pa->SetLineWidth(2);
+    h->GetListOfFunctions()->Add(pa); 
+
   }
 
-  h->Draw();
-  fDisplayedHist = find(fHistList.begin(), fHistList.end(), h);
+  if (h) {
+    h->Draw();
+    fDisplayedHist = find(fHistList.begin(), fHistList.end(), h);
+  }
   PixTest::update(); 
   
-  LOG(logINFO) << "PixTestBBMap::doTest() done";
+  int seconds = t.RealTime();
+  LOG(logINFO) << "PixTestBBMap::doTest() done"
+	       << (fNDaqErrors>0? Form(" with %d decoding errors: ", static_cast<int>(fNDaqErrors)):"") 
+	       << ", duration: " << seconds << " seconds";
   LOG(logINFO) << "number of dead bumps (per ROC): " << bbString;
+  LOG(logINFO) << "separation cut       (per ROC): " << bbCuts;
+  dutCalibrateOff();
 
 }
 
 
+
 // ----------------------------------------------------------------------
-void PixTestBBMap::output4moreweb() {
-  print("PixTestBBMap::output4moreweb()"); 
+int PixTestBBMap::fitPeaks(TH1D *h, TSpectrum &s, int npeaks) {
 
-  list<TH1*>::iterator begin = fHistList.begin();
-  list<TH1*>::iterator end = fHistList.end();
+#if defined ROOT_MAJOR_VER && ROOT_MAJOR_VER > 5
+  Double_t *xpeaks = s.GetPositionX();
+#else
+  Float_t *xpeaks = s.GetPositionX();
+#endif
 
-  TDirectory *pDir = gDirectory; 
-  gFile->cd(); 
-  for (list<TH1*>::iterator il = begin; il != end; ++il) {
-    string name = (*il)->GetName(); 
-    if (string::npos == name.find("_V0"))  continue;
-    if (string::npos != name.find("dist_"))  continue;
-    if (string::npos == name.find("thr_calSMap_VthrComp")) continue;
-    if (string::npos != name.find("calSMap")) {
-      PixUtil::replaceAll(name, "thr_calSMap_VthrComp", "BumpBondMap"); 
+  string name; 
+  double lcuts[3]; lcuts[0] = lcuts[1] = lcuts[2] = 255.;
+  TF1 *f(0); 
+  double peak, sigma;
+  int fittedPeaks(0); 
+  for (int p = 0; p < npeaks; ++p) {
+    double xp = xpeaks[p];
+    if (p > 1) continue;
+    if (xp > 200) {
+      continue;
     }
-    PixUtil::replaceAll(name, "_V0", ""); 
-    TH2D *h = (TH2D*)((*il)->Clone(name.c_str()));
-    h->SetDirectory(gDirectory); 
-    h->Write(); 
+    if (xp < 15) {
+      continue;
+    }
+    name = Form("gauss_%d", p); 
+    f = new TF1(name.c_str(), "gaus(0)", 0., 256.);
+    int bin = h->GetXaxis()->FindBin(xp);
+    double yp = h->GetBinContent(bin);
+    f->SetParameters(yp, xp, 2.);
+    h->Fit(f, "Q+"); 
+    ++fittedPeaks;
+    peak = h->GetFunction(name.c_str())->GetParameter(1); 
+    sigma = h->GetFunction(name.c_str())->GetParameter(2); 
+    if (0 == p) {
+      lcuts[0] = peak + 3*sigma; 
+      if (h->Integral(h->FindBin(peak + 10.*sigma), 250) > 10.) {
+	lcuts[1] = peak + 5*sigma;
+      } else {
+	lcuts[1] = peak + 10*sigma;
+      }
+    } else {
+      lcuts[1] = peak - 3*sigma; 
+      lcuts[2] = peak - sigma; 
+    }
+    delete f;
   }
-  pDir->cd(); 
+  
+  int startbin = (int)(0.5*(lcuts[0] + lcuts[1])); 
+  int endbin = (int)(lcuts[1]); 
+  if (endbin <= startbin) {
+    endbin = (int)(lcuts[2]); 
+    if (endbin < startbin) {
+      endbin = 255.;
+    }
+  }
 
+  int minbin(0); 
+  double minval(999.); 
+  
+  for (int i = startbin; i <= endbin; ++i) {
+    if (h->GetBinContent(i) < minval) {
+      if (1 == fittedPeaks) {
+	if (0 == h->Integral(i, i+4)) {
+	  minval = h->GetBinContent(i); 
+	  minbin = i; 
+	} else {
+	  minbin = endbin;
+	}
+      } else {
+	minval = h->GetBinContent(i); 
+	minbin = i; 
+      }
+    }
+  }
+  
+  LOG(logDEBUG) << "cut for dead bump bonds: " << minbin << " (obtained for minval = " << minval << ")" 
+		<< " start: " << startbin << " .. " << endbin 
+		<< " last peak: " << peak << " last sigma: " << sigma
+		<< " lcuts[0] = " << lcuts[0] << " lcuts[1] = " << lcuts[1];
+  return minbin+1; 
 }

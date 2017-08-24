@@ -6,6 +6,7 @@
 #include "log.h"
 
 #include <TH2.h>
+#include <TStyle.h>
 
 using namespace std;
 using namespace pxar;
@@ -14,8 +15,8 @@ ClassImp(PixTestDacDacScan)
 
 // ----------------------------------------------------------------------
 PixTestDacDacScan::PixTestDacDacScan(PixSetup *a, std::string name) : 
-PixTest(a, name), fParNtrig(-1), fParPHmap(0), fParDAC1("nada"), fParDAC2("nada"), 
-  fParLoDAC1(-1), fParHiDAC1(-1), fParLoDAC2(-1), fParHiDAC2(-1) {
+PixTest(a, name), fParNtrig(1), fParPHmap(0), fParDAC1("vcal"), fParDAC2("vcal"), 
+  fParLoDAC1(0), fParHiDAC1(0), fParLoDAC2(0), fParHiDAC2(0) {
   PixTest::init();
   init(); 
   LOG(logDEBUG) << "PixTestDacDacScan ctor(PixSetup &a, string, TGTab *)";
@@ -79,22 +80,14 @@ bool PixTestDacDacScan::setParameter(string parName, string sval) {
 	  pixc = atoi(str1.c_str()); 
 	  str2 = sval.substr(s1+1); 
 	  pixr = atoi(str2.c_str()); 
+	  clearSelectedPixels();
 	  fPIX.push_back(make_pair(pixc, pixr)); 
+	  addSelectedPixels(sval); 
 	} else {
+	  clearSelectedPixels();
 	  fPIX.push_back(make_pair(-1, -1)); 
+	  addSelectedPixels("-1,-1"); 
 	}
-      }
-      if (!parName.compare("pix1")) {
-	LOG(logWARNING) << "please change parameter name from PIX1 to PIX (can appear multiple times)"; 
-      }
-      if (!parName.compare("pix2")) {
-	LOG(logWARNING) << "please change parameter name from PIX2 to PIX (can appear multiple times)"; 
-      }
-      if (!parName.compare("pix3")) {
-	LOG(logWARNING) << "please change parameter name from PIX3 to PIX (can appear multiple times)"; 
-      }
-      if (!parName.compare("pix4")) {
-	LOG(logWARNING) << "please change parameter name from PIX4 to PIX (can appear multiple times)"; 
       }
 
       break;
@@ -146,17 +139,23 @@ PixTestDacDacScan::~PixTestDacDacScan() {
 
 // ----------------------------------------------------------------------
 void PixTestDacDacScan::doTest() {
-  uint16_t FLAGS = FLAG_FORCE_SERIAL | FLAG_FORCE_MASKED; // required for manual loop over ROCs
+
+  //  uint16_t FLAGS = FLAG_FORCE_SERIAL | FLAG_FORCE_MASKED; // required for manual loop over ROCs
+  uint16_t FLAGS = FLAG_FORCE_MASKED; // required for manual loop over ROCs
+  gStyle->SetPalette(1);
   fDirectory->cd();
   PixTest::update(); 
-  LOG(logDEBUG) << "dac scan " << fParDAC1 << " vs. " << fParDAC2 << " ntrig = " << fParNtrig << " for npixels = " << fPIX.size(); 
 
   string zname = fParDAC1 + string(":") + fParDAC2; 
   bookHist(zname);
   string::size_type s1 = zname.find(":"); 
   string dac1 = zname.substr(0, s1); 
   string dac2 = zname.substr(s1+1); 
-  LOG(logDEBUG) << "PixTestDacDacScan for dacs ->" << dac1 << "<- and ->" << dac2 << "<-";
+  LOG(logINFO) << "PixTestDacDacScan: " << dac1 << "[" << fParLoDAC1 << ", " << fParHiDAC1 << "]" 
+	       << " vs. " << dac2  << "[" << fParLoDAC2 << ", " << fParHiDAC2 << "]" 
+	       << (fParPHmap?" average PH":" readouts")
+	       << ", ntrig = " << fParNtrig 
+	       << ", npixels = " << fPIX.size(); 
   
   TH2D *h2(0);
   map<string, TH2D*> maps;
@@ -182,34 +181,41 @@ void PixTestDacDacScan::doTest() {
   fApi->_dut->testAllPixels(false);
   fApi->_dut->maskAllPixels(true);
   vector<pair<uint8_t, pair<uint8_t, vector<pixel> > > >  rresults, results;
+  int problems(0); 
+  fNDaqErrors = 0; 
   for (unsigned int i = 0; i < fPIX.size(); ++i) {
     if (fPIX[i].first > -1)  {
       fApi->_dut->testPixel(fPIX[i].first, fPIX[i].second, true);
       fApi->_dut->maskPixel(fPIX[i].first, fPIX[i].second, false);
       bool done = false;
+      int cnt(0); 
       while (!done) {
-	int cnt(0); 
 	try{
 	  if (0 == fParPHmap) {
 	    rresults = fApi->getEfficiencyVsDACDAC(fParDAC1, fParLoDAC1, fParHiDAC1, 
 						   fParDAC2, fParLoDAC2, fParHiDAC2, FLAGS, fParNtrig);
+	    fNDaqErrors = fApi->getStatistics().errors_pixel();
 	    done = true;
 	  } else {
 	    rresults = fApi->getPulseheightVsDACDAC(fParDAC1, fParLoDAC1, fParHiDAC1, 
 						    fParDAC2, fParLoDAC2, fParHiDAC2, FLAGS, fParNtrig);
+	    fNDaqErrors = fApi->getStatistics().errors_pixel();
 	    done = true;
 	  }
 	} catch(DataMissingEvent &e){
 	  LOG(logCRITICAL) << "problem with readout: "<< e.what() << " missing " << e.numberMissing << " events"; 
+	  fNDaqErrors = 666666;
 	  ++cnt;
 	  if (e.numberMissing > 10) done = true; 
 	} catch(pxarException &e) {
 	  LOG(logCRITICAL) << "pXar execption: "<< e.what(); 
+	  fNDaqErrors = 666667;
 	  ++cnt;
 	}
 	done = (cnt>5) || done;
       }
 
+      if (fNDaqErrors > 0) problems = fNDaqErrors; 
       copy(rresults.begin(), rresults.end(), back_inserter(results)); 
 
       fApi->_dut->testPixel(fPIX[i].first, fPIX[i].second, false);
@@ -227,15 +233,15 @@ void PixTestDacDacScan::doTest() {
       vector<pixel> wpix = w.second;
 
       for (unsigned ipix = 0; ipix < wpix.size(); ++ipix) {
-	if (wpix[ipix].roc_id == rocIds[iroc]) {
+	if (wpix[ipix].roc() == rocIds[iroc]) {
 	  h = maps[Form("%s_%s_%s_c%d_r%d_C%d", 
-			name.c_str(), fParDAC1.c_str(), fParDAC2.c_str(), wpix[ipix].column, wpix[ipix].row, rocIds[iroc])];
+			name.c_str(), fParDAC1.c_str(), fParDAC2.c_str(), wpix[ipix].column(), wpix[ipix].row(), rocIds[iroc])];
 	  if (h) {
-	    h->Fill(idac1, idac2, wpix[ipix].getValue()); 
+	    h->Fill(idac1, idac2, wpix[ipix].value()); 
 	  } else {
 	    LOG(logDEBUG) << "XX did not find " 
 			  << Form("%s_%s_%s_c%d_r%d_C%d", 
-				  name.c_str(), fParDAC1.c_str(), fParDAC2.c_str(), wpix[ipix].column, wpix[ipix].row, rocIds[iroc]);
+				  name.c_str(), fParDAC1.c_str(), fParDAC2.c_str(), wpix[ipix].column(), wpix[ipix].row(), rocIds[iroc]);
 	  }
 
 	}
@@ -243,11 +249,13 @@ void PixTestDacDacScan::doTest() {
 
     }
 
-    fDisplayedHist = find(fHistList.begin(), fHistList.end(), h);
-    if (h) h->Draw(getHistOption(h).c_str());
-    PixTest::update(); 
   }
 
+  LOG(logINFO) << "dac dac scan done" << (problems > 0? Form(" problems observed: %d", problems): " no problems seen"); 
+  fDisplayedHist = find(fHistList.begin(), fHistList.end(), h);
+  if (h) h->Draw(getHistOption(h).c_str());
+  PixTest::update(); 
+  dutCalibrateOff();
 }
 
 

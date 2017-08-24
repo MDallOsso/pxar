@@ -1,20 +1,44 @@
 #pragma once
 
 #include "rpc.h"
+#include <vector>
+
+#ifdef INTERFACE_USB
 #include "USBInterface.h"
+#endif /* INTERFACE_USB */
+
+#ifdef INTERFACE_ETH
+#include "EthernetInterface.h"
+#endif /* INTERFACE_ETH */
 
 class CTestboard
 {
 	RPC_DEFS
 	RPC_THREAD
 
-	CUSB usb;
+#ifdef INTERFACE_USB
+  CUSB *usb;
+#endif /* INTERFACE_USB */
+
+#ifdef INTERFACE_ETH
+  CEthernet *ethernet;
+#endif /* INTERFACE_ETH */
+
+  std::vector<CRpcIo*> interfaceList;
 
 public:
 	CRpcIo& GetIo() { return *rpc_io; }
 
 	CTestboard() { 
-	  RPC_INIT rpc_io = &usb;
+	  RPC_INIT 
+
+#ifdef INTERFACE_USB
+	  usb = NULL;
+#endif /* INTERFACE_USB */
+
+#ifdef INTERFACE_ETH
+	  ethernet = NULL;
+#endif /* INTERFACE_ETH */
 	}
 	~CTestboard() { RPC_EXIT }
 
@@ -63,35 +87,131 @@ public:
 
 	inline bool Open(string &name, bool init=true) {
 	  rpc_Clear();
-	  if (!usb.Open(&(name[0]))) return false;
+	  if (!rpc_io->Open(&(name[0]))) return false;
 	  if (init) Init();
 	  return true;
 	}
 
 	void Close() {
-	  usb.Close();
+	  rpc_io->Close();
 	  rpc_Clear();
 	}
 
-	bool EnumFirst(unsigned int &nDevices) { return usb.EnumFirst(nDevices); }
-	bool EnumNext(string &name) {
+	void SelectInterface(CRpcIo * io) {
+	  rpc_io = io;
+	}
+
+	bool SelectInterface(std::string ifaceName) {
+
+	  bool ifaceFound = false;
+	  for(std::vector<CRpcIo*>::iterator iface = interfaceList.begin(); iface != interfaceList.end(); iface++) {
+	    try {
+	      if(ifaceName == std::string((*iface)->Name())) {
+		rpc_io = *iface;
+		LOG(pxar::logDEBUGRPC) << "Assigned interface " << std::string((*iface)->Name());
+		ifaceFound = true;
+	      }
+	    }
+	    catch (CRpcError &e) {
+	      LOG(pxar::logCRITICAL) << "Error querying interface " << std::string((*iface)->Name()) << ": ";
+	      e.What();
+	      return false;
+	    }
+	  }
+
+	  return ifaceFound;
+	}
+
+	void ClearInterface() {
+	  rpc_io = &RpcIoNull;
+	}
+
+	bool EnumFirst(CRpcIo* io, unsigned int &nDevices) { return io->EnumFirst(nDevices); }
+	bool EnumNext(CRpcIo* io, string &name) {
 	  char s[64];
-	  if (!usb.EnumNext(s)) return false;
+	  if (!io->EnumNext(s)) return false;
 	  name = s;
 	  return true;
 	}
-	bool Enum(unsigned int pos, string &name) {
+	bool Enum(CRpcIo* io, unsigned int pos, string &name) {
 	  char s[64];
-	  if (!usb.Enum(s, pos)) return false;
+	  if (!io->Enum(s, pos)) return false;
 	  name = s;
 	  return true;
 	}
 
-	void SetTimeout(unsigned int timeout) { usb.SetTimeout(timeout); }
+	std::vector<CRpcIo*> GetInterfaceList() {
+	  interfaceList.clear();
 
-	bool IsConnected() { return usb.Connected(); }
+#ifdef INTERFACE_ETH
+	  if(ethernet == NULL) {
+	    try {
+	      ethernet = new CEthernet();
+	      interfaceList.push_back(ethernet);
+	    }
+	    catch(CRpcError e) {
+	      LOG(pxar::logERROR) << "Error initiating ethernet. "
+				  << "Please ensure proper permissions are granted.";
+	    }
+	  } else { interfaceList.push_back(ethernet); }
+#endif /*INTERFACE_ETH*/
+
+#ifdef INTERFACE_USB
+	  if(usb == NULL) {
+	    try {
+	      usb = new CUSB();
+	      interfaceList.push_back(usb);
+	    }
+	    catch(CRpcError /*e*/) {
+	      LOG(pxar::logERROR) << "Error initiating usb. "
+				  << "Please ensure proper permissions are granted.";
+	    }
+	  }
+	  else { interfaceList.push_back(usb); }
+#endif /*INTERFACE_USB*/
+
+	  for(std::vector<CRpcIo*>::iterator iface = interfaceList.begin(); iface != interfaceList.end(); iface++) {
+	    LOG(pxar::logDEBUGRPC) << "Found interface \"" << std::string((*iface)->Name()) << "\"";
+	  }
+	  return interfaceList;
+	}
+
+	uint32_t GetInterfaceListSize() {
+
+	  if(interfaceList.empty()) interfaceList = GetInterfaceList();
+	  return interfaceList.size();
+	}
+
+	std::vector<std::pair<std::string,std::string> > GetDeviceList() {
+	  std::vector<std::pair<std::string,std::string> > deviceList;
+	  std::string name;
+	  unsigned int nDev;
+	  unsigned int nr;
+
+	  for(std::vector<CRpcIo*>::iterator iface = interfaceList.begin(); iface != interfaceList.end(); iface++) {
+	    try {
+	      if (!EnumFirst(*iface,nDev)) continue;
+	      for (nr = 0; nr < nDev; nr++) {
+		if (!EnumNext(*iface,name)) continue;
+		if (name.size() < 4) continue;
+		if (name.compare(0, 4, "DTB_") == 0) deviceList.push_back(std::make_pair(std::string((*iface)->Name()),name));
+	      }
+	    }
+	    catch (CRpcError &e) {
+	      LOG(pxar::logCRITICAL) << "Error querying interface " << std::string((*iface)->Name()) << ":";
+	      e.What();
+	      //throw pxar::UsbConnectionError("Error querying interface " + std::string((*iface)->Name()));
+	    }
+	  }
+
+	  return deviceList;
+	}
+
+	void SetTimeout(unsigned int timeout) { rpc_io->SetTimeout(timeout); }
+
+	bool IsConnected() { return rpc_io->Connected(); }
 	const char * ConnectionError()
-	{ return usb.GetErrorMsg(usb.GetLastError()); }
+	{ return rpc_io->GetErrorMsg(rpc_io->GetLastError()); }
 
 	void Flush() { rpc_io->Flush(); }
 	void Clear() { rpc_io->Clear(); }
@@ -152,6 +272,8 @@ public:
 	RPC_EXPORT void SignalProbeD1(uint8_t signal);
 	RPC_EXPORT void SignalProbeD2(uint8_t signal);
 
+        RPC_EXPORT void SignalProbeDeserD1(uint8_t deser, uint8_t signal);
+        RPC_EXPORT void SignalProbeDeserD2(uint8_t deser, uint8_t signal);
 
 	// --- analog signal probe ----------------------------------------------
 	RPC_EXPORT void SignalProbeA1(uint8_t signal);
@@ -172,6 +294,10 @@ public:
 	RPC_EXPORT uint16_t _GetVA();
 	RPC_EXPORT uint16_t _GetID();
 	RPC_EXPORT uint16_t _GetIA();
+
+	RPC_EXPORT uint16_t _GetVD_Reg();
+	RPC_EXPORT uint16_t _GetVDAC_Reg();
+	RPC_EXPORT uint16_t _GetVD_Cap();
 
 	RPC_EXPORT void HVon();
 	RPC_EXPORT void HVoff();
@@ -194,11 +320,20 @@ public:
 	RPC_EXPORT void Pg_Triggers(uint32_t triggers, uint16_t period);
 	RPC_EXPORT void Pg_Loop(uint16_t period);
 
+	// --- trigger ----------------------------------------------------------
+	RPC_EXPORT void Trigger_Select(uint16_t mask);
+	RPC_EXPORT void Trigger_Delay(uint8_t delay);
+	RPC_EXPORT void Trigger_Timeout(uint16_t timeout);
+	RPC_EXPORT void Trigger_SetGenPeriodic(uint32_t periode);
+	RPC_EXPORT void Trigger_SetGenRandom(uint32_t rate);
+	RPC_EXPORT void Trigger_Send( uint8_t send);
+
 	// --- data aquisition --------------------------------------------------
 	RPC_EXPORT uint32_t Daq_Open(uint32_t buffersize, uint8_t channel); // max # of samples
 	RPC_EXPORT void Daq_Close(uint8_t channel);
 	RPC_EXPORT void Daq_Start(uint8_t channel);
 	RPC_EXPORT void Daq_Stop(uint8_t channel);
+	RPC_EXPORT void Daq_MemReset(uint8_t channel);
 	RPC_EXPORT uint32_t Daq_GetSize(uint8_t channel);
 	RPC_EXPORT uint8_t Daq_FillLevel(uint8_t channel);
 	RPC_EXPORT uint8_t Daq_FillLevel();
@@ -211,14 +346,38 @@ public:
 	RPC_EXPORT void Daq_Select_Deser400();
 	RPC_EXPORT void Daq_Deser400_Reset(uint8_t reset);
 	RPC_EXPORT void Daq_Deser400_OldFormat(bool old);
+	RPC_EXPORT void Daq_Select_Datagenerator(uint16_t startvalue);
 	RPC_EXPORT void Daq_DeselectAll();
 	
-	RPC_EXPORT void Daq_Select_Datagenerator(uint16_t startvalue);
+	// --- DESER400 configuration -------------------------------------------
+	RPC_EXPORT void Deser400_Enable(uint8_t deser);
+	RPC_EXPORT void Deser400_Disable(uint8_t deser);
+	RPC_EXPORT void Deser400_DisableAll();
+
+	RPC_EXPORT void Deser400_SetPhase(uint8_t deser, uint8_t phase);
+	RPC_EXPORT void Deser400_SetPhaseAuto(uint8_t deser);
+	RPC_EXPORT void Deser400_SetPhaseAutoAll();
+
+	RPC_EXPORT uint8_t Deser400_GetXor(uint8_t deser);
+	RPC_EXPORT uint8_t Deser400_GetPhase(uint8_t deser);
+
+	/* --- deser400 phase detector trigger
+		rate / measure time:
+		  0       112.5 /  75 ns
+		  1       212.5 / 175 ns (default)
+		  2       412.5 / 375 ns
+		  3       812.5 / 775 ns
+	*/
+	RPC_EXPORT void Deser400_GateRun(uint8_t width, uint8_t period);
+	RPC_EXPORT void Deser400_GateSingle(uint8_t width);
+	RPC_EXPORT void Deser400_GateStop();
 
 
 	// --- ROC/module Communication -----------------------------------------
 	// -- set the i2c address for the following commands
 	RPC_EXPORT void roc_I2cAddr(uint8_t id);
+	// -- set the i2c address for a Layer1 module ROC (internally used after calling mod_Addr(uint,uint)
+	RPC_EXPORT void roc_I2cAddr_Layer_1(uint8_t id);
 	// -- sends "ClrCal" command to ROC
 	RPC_EXPORT void roc_ClrCal();
 	// -- sets a single (DAC) register
@@ -240,6 +399,9 @@ public:
 	// -- enable/disable a double column
 	RPC_EXPORT void roc_Col_Enable(uint8_t col, bool on);
 
+	// -- enable/disable all double columns
+	RPC_EXPORT void roc_AllCol_Enable(bool on);
+
 	// -- mask all pixels of a column and the coresponding double column
 	RPC_EXPORT void roc_Col_Mask(uint8_t col);
 
@@ -251,7 +413,9 @@ public:
 	RPC_EXPORT void tbm_Enable(bool on);
 	RPC_EXPORT void tbm_Addr(uint8_t hub, uint8_t port);
 	RPC_EXPORT void mod_Addr(uint8_t hub);
+	RPC_EXPORT void mod_Addr(uint8_t hub0, uint8_t hub1);
 	RPC_EXPORT void tbm_Set(uint8_t reg, uint8_t value);
+	RPC_EXPORT void tbm_SelectRDA(uint8_t channel);
 	RPC_EXPORT bool tbm_Get(uint8_t reg, uint8_t &value);
 	RPC_EXPORT bool tbm_GetRaw(uint8_t reg, uint32_t &value);
 
@@ -263,23 +427,7 @@ public:
 	RPC_EXPORT uint32_t Ethernet_RecvPackets();
 
 	RPC_EXPORT void VectorTest(vector<uint16_t> &in, vectorR<uint16_t> &out);
-	
-	RPC_EXPORT int32_t CountReadouts(int32_t nTriggers);
-	RPC_EXPORT int32_t CountReadouts(int32_t nTriggers, int32_t chipId);
-	RPC_EXPORT int32_t CountReadouts(int32_t nTriggers, int32_t dacReg, int32_t dacValue);
-	RPC_EXPORT int32_t PixelThreshold(int32_t col, int32_t row, int32_t start, int32_t step, int32_t thrLevel, int32_t nTrig, int32_t dacReg, bool xtalk, bool cals);
-	RPC_EXPORT int32_t PH(int32_t col, int32_t row, int32_t trim, int16_t nTriggers);
-	RPC_EXPORT bool test_pixel_address(int32_t col, int32_t row);
-	RPC_EXPORT int32_t ChipEfficiency_dtb(int16_t nTriggers, vectorR<uint8_t> &res);
-
-	RPC_EXPORT int8_t CalibratePixel(int16_t nTriggers, int16_t col, int16_t row, int16_t &nReadouts, int32_t &PHsum);
-	RPC_EXPORT int8_t CalibrateDacScan(int16_t nTriggers, int16_t col, int16_t row, int16_t dacReg1, int16_t dacLower1, int16_t dacUpper1, vectorR<int16_t>& nReadouts, vectorR<int32_t> &PHsum);
-	RPC_EXPORT int8_t CalibrateDacDacScan(int16_t nTriggers, int16_t  col, int16_t  row, int16_t  dacReg1, int16_t  dacLower1, int16_t  dacUpper1, int16_t  dacReg2, int16_t  dacLower2, int16_t  dacUpper2, vectorR<int16_t> &nReadouts, vectorR<int32_t> &PHsum);
-	RPC_EXPORT void ParallelCalibrateDacDacScan(vector<uint8_t> &roc_i2c, uint16_t nTriggers, uint8_t col, uint8_t row, uint8_t dacReg1, uint8_t dacLower1, uint8_t dacUpper1, uint8_t dacReg2, uint8_t dacLower2, uint8_t dacUpper2, uint16_t flags);
-	RPC_EXPORT int16_t CalibrateMap(int16_t nTriggers, vectorR<int16_t> &nReadouts, vectorR<int32_t> &PHsum, vectorR<uint32_t> &address);
-	RPC_EXPORT int16_t CalibrateModule(vector<uint8_t> &roc_i2c, uint16_t nTriggers, uint16_t flags);
 	RPC_EXPORT int16_t TrimChip(vector<int16_t> &trim);
-	RPC_EXPORT int16_t TriggerRow(int16_t nTriggers, int16_t col, vector<int16_t> &rocs, int16_t delay=4);
 
 
 	// == Wafer Test functions =====================================================
@@ -292,6 +440,7 @@ public:
 	RPC_EXPORT bool SetTrimValues(uint8_t roc_i2c, std::vector<uint8_t> &trimvalues);
 	
 	RPC_EXPORT void SetLoopTriggerDelay(uint16_t delay);
+	RPC_EXPORT void SetLoopTrimDelay(uint16_t delay);
 	RPC_EXPORT void LoopInterruptReset();
 
 	// Exported RPC-Calls for Maps
@@ -329,7 +478,7 @@ public:
 	RPC_EXPORT bool LoopSingleRocOnePixelDacDacScan(uint8_t roc_i2c, uint8_t column, uint8_t row, uint16_t nTriggers, uint16_t flags, uint8_t dac1register, uint8_t dac1step, uint8_t dac1low, uint8_t dac1high, uint8_t dac2register, uint8_t dac2step, uint8_t dac2low, uint8_t dac2high);
 
 
-	// Debug-RPC-Calls returnung a Checker Board Pattern
+	// Debug-RPC-Calls returning a Checker Board Pattern
 	RPC_EXPORT void LoopCheckerBoard(uint8_t roc_i2c, uint8_t column, uint8_t row, uint16_t nTriggers, uint16_t flags, uint8_t dac1register, uint8_t dac1low, uint8_t dac1high, uint8_t dac2register, uint8_t dac2low, uint8_t dac2high);
 
 };

@@ -15,14 +15,18 @@ namespace pxar {
 #define DTB_DAQ_FIFO_OVFL 4 // bit 2 = DAQ fast HW FIFO overflow
 #define DTB_DAQ_MEM_OVFL  2 // bit 1 = DAQ RAM FIFO overflow
 #define DTB_DAQ_STOPPED   1 // bit 0 = DAQ stopped (because of overflow)
-
+#define DTB_DAQ_CHANNELS  8 // Number of DAQ channels implemented in the DTB
 
 // --- TBM Types ---------------------------------------------------------------
-// FIXME just an example...
-#define TBM_08             0x01
-#define TBM_08A            0x02
-#define TBM_08B            0x03
-#define TBM_09             0x04
+#define TBM_NONE           0x20
+#define TBM_EMU            0x21
+#define TBM_08             0x22
+#define TBM_08A            0x23
+#define TBM_08B            0x24
+#define TBM_08C            0x25
+#define TBM_09             0x26
+#define TBM_09C            0x27
+#define TBM_10C            0x28
 
 
 // --- TBM Register -----------------------------------------------------------
@@ -34,9 +38,11 @@ namespace pxar {
 #define TBM_REG_CLEAR_INJECT        0x04
 #define TBM_REG_SET_PKAM_COUNTER    0x08
 #define TBM_REG_SET_DELAYS          0x0A
-#define TBM_REG_TEMPERATURE_CONTROL 0x0C
+#define TBM_REG_AUTORESET           0x0C
 #define TBM_REG_CORES_A_B           0x0E
-
+// Special TBM settings, only for pxar internal use:
+#define TBM_TOKENCHAIN_0            0xFE
+#define TBM_TOKENCHAIN_1            0xFF
 
 // --- ROC Size ---------------------------------------------------------------
 #define ROC_NUMROWS 80
@@ -44,14 +50,17 @@ namespace pxar {
 #define MOD_NUMROCS 16
 
 // --- ROC Types ---------------------------------------------------------------
-#define ROC_PSI46V2        0x01
-#define ROC_PSI46XDB       0x02
-#define ROC_PSI46DIG       0x03
-#define ROC_PSI46DIG_TRIG  0x04
-#define ROC_PSI46DIGV2_B   0x05
-#define ROC_PSI46DIGV2     0x06
-#define ROC_PSI46DIGV21    0x07
-
+#define ROC_NONE              0x00
+#define ROC_PSI46V2           0x01
+#define ROC_PSI46XDB          0x02
+#define ROC_PSI46DIG          0x03
+#define ROC_PSI46DIG_TRIG     0x04
+#define ROC_PSI46DIGV2_B      0x05
+#define ROC_PSI46DIGV2        0x06
+#define ROC_PSI46DIGV21       0x07
+#define ROC_PSI46DIGV21RESPIN 0x08
+#define ROC_PROC600           0x09
+#define ROC_PROC600V2         0x0A
 
 // --- ROC DACs ---------------------------------------------------------------
 #define ROC_DAC_Vdig       0x01
@@ -80,6 +89,7 @@ namespace pxar {
 #define ROC_DAC_VsumCol    0x18
 #define ROC_DAC_Vcal       0x19
 #define ROC_DAC_CalDel     0x1A
+#define ROC_DAC_RangeTemp  0x1B
 #define ROC_DAC_CtrlReg    0xFD
 #define ROC_DAC_WBC        0xFE
 #define ROC_DAC_Readback   0xFF
@@ -90,13 +100,27 @@ namespace pxar {
 #define SIG_CTR 1
 #define SIG_SDA 2
 #define SIG_TIN 3
+#define SIG_RDA_TOUT 4
 
+#define SIG_DESER400PHASE0 0xF0
+#define SIG_DESER400PHASE1 0xF1
+#define SIG_DESER400PHASE2 0xF2
+#define SIG_DESER400PHASE3 0xF3
+#define SIG_DESER400RATE 0xF5
+#define SIG_LOOP_TRIM_DELAY 0xF6
+#define SIG_ADC_TINDELAY 0xF7
+#define SIG_ADC_TOUTDELAY 0xF8
+#define SIG_ADC_TIMEOUT 0xF9
+#define SIG_TRIGGER_TIMEOUT 0xFA
+#define SIG_TRIGGER_LATENCY 0xFB
+#define SIG_LEVEL 0xFC
 #define SIG_LOOP_TRIGGER_DELAY 0xFD
 #define SIG_DESER160PHASE 0xFE
 
 #define SIG_MODE_NORMAL  0
 #define SIG_MODE_LO      1
 #define SIG_MODE_HI      2
+#define SIG_MODE_RNDM    3
 
 
 // --- Testboard Clock / Timing -----------------------------------------------
@@ -115,6 +139,35 @@ namespace pxar {
 #define MHZ_10     2
 #define MHZ_20     1
 #define MHZ_40     0
+
+// --- Trigger settings -------------------------------------------------------
+// Turn off all triggers:
+#define TRG_SEL_NONE       0x0000
+
+// Via TBM Emulator:
+#define TRG_SEL_ASYNC      0x0100
+#define TRG_SEL_SYNC       0x0080
+#define TRG_SEL_SINGLE     0x0040
+#define TRG_SEL_GEN        0x0020
+#define TRG_SEL_PG         0x0010
+
+// Direct signals:
+#define TRG_SEL_ASYNC_DIR  0x0800
+#define TRG_SEL_SYNC_DIR   0x0400
+#define TRG_SEL_SINGLE_DIR 0x0008
+#define TRG_SEL_GEN_DIR    0x0200
+#define TRG_SEL_PG_DIR     0x0004
+#define TRG_SEL_ASYNC_PG   0x8000
+
+// Sync signals:
+#define TRG_SEL_CHAIN      0x0002
+#define TRG_SEL_SYNC_OUT   0x0001
+
+#define TRG_SEND_SYN   1
+#define TRG_SEND_TRG   2
+#define TRG_SEND_RSR   4
+#define TRG_SEND_RST   8
+#define TRG_SEND_CAL  16
 
 
 // --- Testboard digital signal probe -----------------------------------------
@@ -141,7 +194,7 @@ namespace pxar {
 #define PROBE_ADC_START 22
 #define PROBE_ADC_SGATE 23
 #define PROBE_ADC_S 24
-
+#define PROBE_DS_GATE 29
 
 // --- Testboard analog signal probe ------------------------------------------
 #define PROBEA_TIN     0
@@ -158,9 +211,29 @@ namespace pxar {
 #define GAIN_3   2
 #define GAIN_4   3
 
+// --- DESER400 probe
+#define PROBE_FRAME_ERROR    0
+#define PROBE_CODE_ERROR     1
+#define PROBE_ERROR          2  // FRAME or CODE
+  
+#define PROBE_A_HEADER       3
+#define PROBE_A_PACKET       4
+#define PROBE_A_TBM_HDR      5
+#define PROBE_A_ROC_HDR      6
+#define PROBE_A_TBM_TRL      7
+#define PROBE_A_IDLE_ERROR   8
+#define PROBE_A_HDR_ERROR    9
+  
+#define PROBE_B_HEADER      10
+#define PROBE_B_PACKET      11
+#define PROBE_B_TBM_HDR     12
+#define PROBE_B_ROC_HDR     13
+#define PROBE_B_TBM_TRL     14
+#define PROBE_B_IDLE_ERROR  15
+#define PROBE_B_HDR_ERROR   16
+  
 
 // --- Testboard pulse pattern generator --------------------------------------
-#define PG_NONE  0x0000
 #define PG_TOK   0x0100
 #define PG_TRG   0x0200
 #define PG_CAL   0x0400

@@ -7,6 +7,7 @@ from PyPxarCore import Pixel, PixelConfig, PyPxarCore, PyRegisterDictionary, PyP
 from functools import wraps # used in parameter verification decorator ("arity")
 import os # for file system cmds
 import sys
+import shlex
 
 # "arity": decorator used for parameter parsing/verification on each cmd function call
 # Usually, the cmd module only passes a single string ('line') with all parameters;
@@ -32,13 +33,23 @@ def arity(n, m, cs=[]): # n = min number of args, m = max number of args, cs = t
         return __temp2
     return __temp1
 
+def print_data(fullOutput,data,stepsize=1):
+    for idac, dac in enumerate(data):
+        s = "DAC " + str(idac*stepsize) + ": "
+        if fullOutput:
+            for px in dac:
+                s += str(px)
+        else:
+            s += str(len(dac)) + " pixels"
+        print s
+
 def get_possible_filename_completions(text):
     head, tail = os.path.split(text.strip())
     if head == "": #no head
         head = "."
     files = os.listdir(head)
     return [ f for f in files if f.startswith(tail) ]
- 
+
 def extract_full_argument(line, endidx):
     newstart = line.rfind(" ", 0, endidx)
     return line[newstart:endidx]
@@ -47,14 +58,21 @@ class PxarConfigFile:
     """ class that loads the old-style config files of psi46expert """
     def __init__(self, f):
         self.config = {}
-        import shlex
         thisf = open(f)
         try:
             for line in thisf:
-                if not line.startswith("--"):
+                if not line.startswith("--") and not line.startswith("#"):
                     parts = shlex.split(line)
                     if len(parts) == 2:
                         self.config[parts[0].lower()] = parts[1]
+                    elif len(parts) == 3:
+                        parts = [parts[0],' '.join(parts[1:])]
+                        self.config[parts[0].lower()] = parts[1]
+                    elif len(parts) == 4:
+                        parts = [parts[0],' '.join(parts[1:])]
+                        if len(parts) == 2:
+                            self.config[parts[0].lower()] = parts[1]
+
         finally:
             thisf.close()
     def show(self):
@@ -69,11 +87,10 @@ class PxarParametersFile:
     """ class that loads the old-style parameters files of psi46expert """
     def __init__(self, f):
         self.config = {}
-        import shlex
         thisf = open(f)
         try:
             for line in thisf:
-                if not line.startswith("--"):
+                if not line.startswith("--") and not line.startswith("#"):
                     parts = shlex.split(line)
                     if len(parts) == 3:
                         # ignore the first part (index/line number)
@@ -92,14 +109,90 @@ class PxarParametersFile:
     def getAll(self):
         return self.config
 
+class PxarMaskFile:
+    """ class that loads the mask files of pxarGUI """
+    def __init__(self, f):
+        self.config = list()
+        thisf = open(f)
+        try:
+            for line in thisf:
+                if not line.startswith("--") and not line.startswith("#"):
+                    parts = shlex.split(line)
+                    if len(parts) == 4:
+                        # single pixel to be masked:
+                        p = PixelConfig(int(parts[2]),int(parts[3]),15)
+                        p.roc = int(parts[1])
+                        p.mask = True
+                        self.config.append(p)
+                    elif len(parts) == 3:
+                        # Full Column/Row to be masked:
+                        if parts[0] == "col":
+                            for row in range(0, 80):
+                                p = PixelConfig(int(parts[2]),row,15)
+                                p.roc = int(parts[1])
+                                p.mask = True
+                                self.config.append(p)
+                        elif parts[0] == "row":
+                            for column in range(0, 52):
+                                p = PixelConfig(column,int(parts[2]),15)
+                                p.roc = int(parts[1])
+                                p.mask = True
+                                self.config.append(p)
+                    elif len(parts) == 2:
+                        # Full ROC to be masked
+                        for column in range(0, 52):
+                            for row in range(0, 80):
+                                p = PixelConfig(column,row,15)
+                                p.roc = int(parts[1])
+                                p.mask = True
+                                self.config.append(p)
+        finally:
+            thisf.close()
+    def show(self):
+        print self.config
+    def get(self):
+        return self.config
+
+class PxarTrimFile:
+    """ class that loads the old-style trim parameters files of psi46expert """
+    def __init__(self, f, roc, masks):
+        self.config = list()
+        thisf = open(f)
+        try:
+            for line in thisf:
+                if not line.startswith("--") and not line.startswith("#"):
+                    parts = shlex.split(line)
+                    if len(parts) == 4:
+                        # Ignore the 'Pix' string in the file...
+                        p = PixelConfig(int(parts[2]),int(parts[3]),int(parts[0]))
+                        p.roc = roc
+                        # Check if this pixel is masked:
+                        if p in masks:
+                            p.mask = True
+                        else:
+                            p.mask = False
+                        self.config.append(p)
+        finally:
+            thisf.close()
+    def show(self):
+        print self.config
+    def get(self, opt, default = None):
+        if default:
+            return self.config.get(opt.lower(),default)
+        else:
+            return self.config[opt.lower()]
+    def getAll(self):
+        return self.config
+
 def PxarStartup(directory, verbosity):
     if not directory or not os.path.isdir(directory):
         print "Error: no or invalid configuration directory specified!"
         sys.exit(404)
-    
+
     config = PxarConfigFile('%sconfigParameters.dat'%(os.path.join(directory,"")))
     tbparameters = PxarParametersFile('%s%s'%(os.path.join(directory,""),config.get("tbParameters")))
-    tbmparameters = PxarParametersFile('%s%s'%(os.path.join(directory,""),config.get("tbmParameters")))
+    masks = PxarMaskFile('%s%s'%(os.path.join(directory,""),config.get("maskFile")))
+    
     # Power settings:
     power_settings = {
         "va":config.get("va",1.9),
@@ -107,38 +200,16 @@ def PxarStartup(directory, verbosity):
         "ia":config.get("ia",1.190),
         "id":config.get("id",1.10)}
 
-    # Pattern Generator for single ROC operation:
-    if int(config.get("nTbms")) == 0:
-        pg_setup = (
-            ("PG_RESR",25),
-            ("PG_CAL",106),
-            ("PG_TRG",16),
-            ("PG_TOK",0))
-    else:
-        pg_setup = (
-            ("PG_REST",15),
-            ("PG_CAL",106),
-            ("PG_TRG",0))
-
-    # Start an API instance from the core pxar library
-    api = PyPxarCore(usbId=config.get("testboardName"),logLevel=verbosity)
-    print api.getVersion()
-    if not api.initTestboard(pg_setup = pg_setup, 
-                             power_settings = power_settings,
-                             sig_delays = tbparameters.getAll()):
-        print "WARNING: could not init DTB -- possible firmware mismatch."
-        print "Please check if a new FW version is available"
-        exit
-
-    
     tbmDACs = []
     for tbm in range(int(config.get("nTbms"))):
-        tbmDACs.append(tbmparameters.getAll())
+        for n in range(2):
+            tbmparameters = PxarParametersFile('%s%s'%(os.path.join(directory,""),config.get("tbmParameters") + "_C" + str(tbm) + ("a" if n%2 == 0 else "b") + ".dat"))
+            tbmDACs.append(tbmparameters.getAll())
 
-    print "Have DAC config for " + str(len(tbmDACs)) + " TBMs:"
+    print "Have DAC config for " + str(len(tbmDACs)) + " TBM cores:"
     for idx, tbmDAC in enumerate(tbmDACs):
         for key in tbmDAC:
-            print "  TBM dac: " + str(key) + " = " + str(tbmDAC[key])
+            print "  TBM " + str(idx/2) + ("a" if idx%2 == 0 else "b") + " dac: " + str(key) + " = " + str(tbmDAC[key])
 
     # init pixel list
     pixels = list()
@@ -150,14 +221,57 @@ def PxarStartup(directory, verbosity):
 
     rocDacs = []
     rocPixels = list()
-    for roc in xrange(int(config.get("nrocs"))):
-        dacconfig = PxarParametersFile('%s%s_C%i.dat'%(os.path.join(directory,""),config.get("dacParameters"),roc))
+    rocI2C = []
+    config_nrocs = config.get("nrocs").split()
+    nrocs = int(config_nrocs[0])
+    i2cs = [i for i in range(nrocs)]
+    if len(config_nrocs) > 1:
+        if config_nrocs[1].startswith('i2c'):
+            i2cs = ' '.join(config_nrocs[2:])
+            i2cs = [int(i) for i in i2cs.split(',')]
+            print "Number of ROCs:", nrocs, "\b; Configured I2C's:", i2cs
+    for roc in xrange(nrocs):
+        if len(i2cs)> roc:
+            i2c = i2cs[roc]
+        else:
+            i2c = roc
+        dacconfig = PxarParametersFile('%s%s_C%i.dat'%(os.path.join(directory,""),config.get("dacParameters"),i2c))
+        trimconfig = PxarTrimFile('%s%s_C%i.dat'%(os.path.join(directory,""),config.get("trimParameters"),i2c),i2c,masks.get())
+        print "We have " + str(len(trimconfig.getAll())) + " pixels for ROC " + str(i2c)
+        rocI2C.append(i2c)
         rocDacs.append(dacconfig.getAll())
-        rocPixels.append(pixels)
+        rocPixels.append(trimconfig.getAll())
 
-    print "And we have just initialized " + str(len(pixels)) + " pixel configs to be used for every ROC!"
+    # set pgcal according to wbc
+    pgcal = int(rocDacs[0]['wbc']) + 6
 
-    api.initDUT(0,config.get("tbmType","tbm08"),tbmDACs,config.get("rocType"),rocDacs,rocPixels)
+    # Pattern Generator for single ROC operation:
+    if int(config.get("nTbms")) == 0:
+        pg_setup = (
+            ("PG_RESR",25),
+            ("PG_CAL",pgcal),
+            ("PG_TRG",16),
+            ("PG_TOK",0))
+    else:
+        pg_setup = (
+            ("PG_RESR",15),
+            ("PG_CAL",pgcal),
+            ("PG_TRG",0))
+
+       # Start an API instance from the core pxar library
+    api = PyPxarCore(usbId=config.get("testboardName"),logLevel=verbosity)
+    print api.getVersion()
+    if not api.initTestboard(pg_setup = pg_setup,
+    power_settings = power_settings,
+    sig_delays = tbparameters.getAll()):
+        print "WARNING: could not init DTB -- possible firmware mismatch."
+        print "Please check if a new FW version is available"
+        exit
+
+    hubid_splitter=shlex.shlex(config.get("hubId",31))
+    hubid_splitter.whitespace+=','
+    hubids=list(hubid_splitter)
+    api.initDUT(map(int, hubids),config.get("tbmType","tbm08"),tbmDACs,config.get("rocType"),rocDacs,rocPixels, rocI2C)
 
     api.testAllPixels(True)
     print "Now enabled all pixels"
